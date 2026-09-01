@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Calorie Tracker</title>
+  <meta name="theme-color" content="#0b0e13">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Calories">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <main id="app">
+    <section class="screen active" id="screen-dashboard"></section>
+    <section class="screen" id="screen-foods"></section>
+    <section class="screen" id="screen-recipes"></section>
+    <section class="screen" id="screen-recipeEdit"></section>
+    <section class="screen" id="screen-convert"></section>
+    <section class="screen" id="screen-settings"></section>
+  </main>
+
+  <nav id="bottom-nav">
+    <button data-screen="dashboard"><span class="nav-ico">📖</span>Diary</button>
+    <button data-screen="foods"><span class="nav-ico">🍎</span>Foods</button>
+    <button data-screen="recipes"><span class="nav-ico">🍲</span>Recipes</button>
+    <button data-screen="convert"><span class="nav-ico">⚖️</span>Convert</button>
+    <button data-screen="settings"><span class="nav-ico">⚙️</span>Settings</button>
+  </nav>
+
+  <div id="modal-root"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
