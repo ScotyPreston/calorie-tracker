@@ -157,6 +157,25 @@ function groupForNow() {
   return 'Snacks';
 }
 
+// liquids: derive a 1-ml unit from any serving whose name carries an ml quantity,
+// e.g. "1 portion (240 ml)" at 240g → ml = 1g. Skipped when no ml amount is named,
+// so dry foods never get a fake density.
+function ensureMlServing(food) {
+  const list = food.servings || [];
+  if (list.some(s => s.name === 'ml')) return false;
+  for (const s of list) {
+    const m = /(\d+(?:\.\d+)?)\s*ml\b/i.exec(s.name || '');
+    const mlQty = m ? parseFloat(m[1]) : 0;
+    if (mlQty > 0 && s.grams > 0) {
+      const ml = { name: 'ml', grams: Math.round(s.grams / mlQty * 1000) / 1000 };
+      const gIdx = list.findIndex(x => x.name === 'g');
+      if (gIdx >= 0) list.splice(gIdx, 0, ml); else list.push(ml);
+      return true;
+    }
+  }
+  return false;
+}
+
 function servingDesc(food) {
   const s = (food.servings || []).find(x => x.name === food.defaultServing) || food.servings?.[0];
   if (!s) return '';
@@ -385,6 +404,7 @@ function openFoodDetail(food, ctx = {}) {
   document.getElementById('modal-root').appendChild(overlayBack);
   const close = () => overlayBack.remove();
 
+  ensureMlServing(food);
   let amount = entry ? (entry.amount || entry.grams) : (food.defaultAmount || 1);
   let servingName = entry
     ? (entry.servingName && (food.servings || []).some(s => s.name === entry.servingName) ? entry.servingName : 'g')
@@ -495,6 +515,7 @@ function openFoodDetail(food, ctx = {}) {
       const r = await refreshBarcodeFood(food);
       if (!r) { toast('No fresh data found for this barcode'); return; }
       food = r.food;
+      ensureMlServing(food);
       render();
       toast(r.warn ? 'Refreshed — but this product’s database entry looks shaky, double-check the label' : 'Product data refreshed ✓');
     };
@@ -774,6 +795,7 @@ function openFoodForm(existing, { barcode = '', onSaved = null, prefill = null }
     for (const s of extraServings) if (s.name && s.grams > 0 && s.name !== sName && s.name !== 'g') servings.push(s);
     if (!servings.some(s => s.name === 'oz')) servings.push({ name: 'oz', grams: 28.35 });
     servings.push({ name: 'g', grams: 1 });
+    ensureMlServing({ servings });
     f.servings = servings;
     if (!f.servings.some(s => s.name === f.defaultServing)) { f.defaultServing = sName; f.defaultAmount = 1; }
     delete f._unsaved;
@@ -1017,6 +1039,7 @@ function offToFood(p, barcode) {
   }
   servings.push({ name: 'oz', grams: 28.35 });
   servings.push({ name: 'g', grams: 1 });
+  ensureMlServing({ servings });
   const name = [p.product_name, p.brands ? `(${p.brands.split(',')[0].trim()})` : ''].filter(Boolean).join(' ').trim() || `Product ${barcode}`;
   return {
     id: uuid(), name, barcode, source: 'openfoodfacts', perGram, servings,
