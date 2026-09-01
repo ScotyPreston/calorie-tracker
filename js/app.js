@@ -405,6 +405,10 @@ function openFoodDetail(food, ctx = {}) {
   const close = () => overlayBack.remove();
 
   ensureMlServing(food);
+  // cooked-weight logging: 'raw' logs the typed weight as-is; 'cooked' divides
+  // by the picked cook method's yield so the RAW-equivalent grams get logged.
+  let weighMode = 'raw';
+  let cookMethod = null;
   let amount = entry ? (entry.amount || entry.grams) : (food.defaultAmount || 1);
   let servingName = entry
     ? (entry.servingName && (food.servings || []).some(s => s.name === entry.servingName) ? entry.servingName : 'g')
@@ -416,7 +420,9 @@ function openFoodDetail(food, ctx = {}) {
 
   const render = () => {
     const serving = (food.servings || []).find(s => s.name === servingName) || { name: 'g', grams: 1 };
-    const grams = (parseFloat(amount) || 0) * serving.grams;
+    const typedGrams = (parseFloat(amount) || 0) * serving.grams;
+    const isCooked = weighMode === 'cooked' && !!cookMethod;
+    const grams = isCooked ? typedGrams / cookMethod.factor : typedGrams;
     const n = scale(food.perGram, grams);
     const mk = macroKcal(n);
     const mkTotal = (mk.protein ?? 0) + (mk.carbs ?? 0) + (mk.fat ?? 0);
@@ -455,14 +461,23 @@ function openFoodDetail(food, ctx = {}) {
             ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${esc(s.name)} (${fg(s.grams)}g)</option>`).join('')}
           </select></label>
         </div>
-        <button class="btn small" id="fd-cooked">⇄ I weighed it cooked</button>
+        <div class="fd-weigh">
+          <span class="fd-weigh-label">Weighed</span>
+          <button class="chip ${weighMode === 'raw' ? 'on' : ''}" id="fd-w-raw">🥄 Raw</button>
+          <button class="chip ${weighMode === 'cooked' ? 'on' : ''}" id="fd-w-cooked">🔥 Cooked</button>
+          ${isCooked ? `<button class="cook-pill" id="fd-method">${esc(cookMethod.label)} ${cookMethod.factor > 1
+            ? `+${Math.round((cookMethod.factor - 1) * 100)}%`
+            : `−${Math.round((1 - cookMethod.factor) * 100)}%`}</button>` : ''}
+        </div>
         <div class="fd-controls">
           ${settings.groupsEnabled ? `<label>Meal<select class="input" id="fd-group">
             ${GROUPS.map(g => `<option ${g === group ? 'selected' : ''}>${g}</option>`).join('')}
           </select></label>` : ''}
           <label>Time<input class="input" id="fd-time" type="time" value="${timeVal}"></label>
         </div>
-        <div class="fd-info-line">Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} — ${fg(grams)}g</div>
+        <div class="fd-info-line">${isCooked
+          ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} cooked — ${fg(grams)}g raw`
+          : `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} — ${fg(grams)}g`}</div>
         <div class="energy-summary">
           <svg viewBox="0 0 120 120" class="donut">${segs}
             <text x="60" y="57" text-anchor="middle" class="donut-kcal">${f0(n.kcal)}</text>
@@ -490,12 +505,16 @@ function openFoodDetail(food, ctx = {}) {
     overlayBack.querySelector('#fd-close').onclick = close;
     overlayBack.querySelector('#fd-amount').oninput = e => { amount = e.target.value; softUpdate(); };
     overlayBack.querySelector('#fd-serving').onchange = e => { servingName = e.target.value; render(); };
-    overlayBack.querySelector('#fd-cooked').onclick = () => converterModal(raw => {
-      amount = Math.round(raw * 10) / 10;
-      servingName = 'g';
+    const pickMethod = () => openYieldPicker({ name: food.name }, y => {
+      if (!y) { weighMode = 'raw'; } else { cookMethod = y; weighMode = 'cooked'; }
       render();
-      toast(`${fg(amount)}g raw dropped into Amount`);
-    }, { foodName: food.name });
+    }, guessYieldCat(food.name) ?? 0);
+    overlayBack.querySelector('#fd-w-raw').onclick = () => { weighMode = 'raw'; render(); };
+    overlayBack.querySelector('#fd-w-cooked').onclick = () => {
+      if (cookMethod) { weighMode = 'cooked'; render(); } else pickMethod();
+    };
+    const methodBtn = overlayBack.querySelector('#fd-method');
+    if (methodBtn) methodBtn.onclick = pickMethod;
     const gsel = overlayBack.querySelector('#fd-group');
     if (gsel) gsel.onchange = e => { group = e.target.value; };
     overlayBack.querySelector('#fd-time').onchange = e => { timeVal = e.target.value; };
@@ -527,17 +546,25 @@ function openFoodDetail(food, ctx = {}) {
       toast(r.warn ? 'Refreshed — but this product’s database entry looks shaky, double-check the label' : 'Product data refreshed ✓');
     };
     overlayBack.querySelector('#fd-log').onclick = async () => {
-      const g = (parseFloat(amount) || 0) * serving.grams;
+      let g = (parseFloat(amount) || 0) * serving.grams;
       if (g <= 0) { toast('Enter an amount first'); return; }
+      // cooked mode: the entry stores the RAW-equivalent so re-editing it later
+      // (which assumes raw weights) stays correct
+      let logAmount = parseFloat(amount) || 1, logServing = serving.name;
+      if (weighMode === 'cooked' && cookMethod) {
+        g = g / cookMethod.factor;
+        logAmount = Math.round(g * 10) / 10;
+        logServing = 'g';
+      }
       const date = ctx.date || currentDate;
       const [hh, mm] = timeVal.split(':').map(Number);
       const [y, mo, d] = date.split('-').map(Number);
       const timestamp = new Date(y, mo - 1, d, hh || 0, mm || 0).toISOString();
       if (mode === 'edit-entry') {
-        await DB.put('log', { ...entry, grams: g, amount: parseFloat(amount) || g, servingName: serving.name, group: settings.groupsEnabled ? group : null, timestamp });
+        await DB.put('log', { ...entry, grams: g, amount: logAmount, servingName: logServing, group: settings.groupsEnabled ? group : null, timestamp });
         schedulePiBackup();
       } else {
-        await addLogEntry(food, { grams: g, amount: parseFloat(amount) || 1, servingName: serving.name, date, group: settings.groupsEnabled ? group : null, timestamp });
+        await addLogEntry(food, { grams: g, amount: logAmount, servingName: logServing, date, group: settings.groupsEnabled ? group : null, timestamp });
       }
       close();
       if (ctx.onLogged) ctx.onLogged();

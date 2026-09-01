@@ -233,6 +233,8 @@ label { display: block; font-size: 13px; color: var(--dim); font-weight: 600; }
 
 .fd-controls { display: flex; gap: 10px; }
 .fd-controls label { flex: 1; }
+.fd-weigh { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; }
+.fd-weigh-label { font-size: 13px; color: var(--dim); font-weight: 600; }
 .fd-info-line { font-size: 13px; color: var(--dim); font-weight: 600; margin: 8px 0; }
 
 .energy-summary { display: flex; align-items: center; gap: 18px; margin: 10px 0 14px; }
