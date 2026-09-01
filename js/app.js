@@ -8,7 +8,7 @@ import { YIELD_CATS } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -86,6 +86,8 @@ function schedulePiBackup() {
 
 async function piBackupNow(manual) {
   if (!manual && settings.piBackup === false) return false;
+  // dev preview on the laptop must never overwrite the phone's backups with test data
+  if (!manual && (location.hostname === 'localhost' || location.hostname === '127.0.0.1')) return false;
   try {
     const data = await DB.exportAll();
     const ctrl = new AbortController();
@@ -1213,11 +1215,11 @@ function renderRecipeBuilder() {
       <button class="btn small" id="rb-add">＋ Add ingredient</button>
       <button class="btn small" id="rb-scan">📷 Scan</button>
     </div>
-    <p class="hint">Weigh ingredients <b>raw</b> (g; for liquids use ml ≈ g). If you weighed one cooked, tap ⇄ to convert. Macros come from raw weights; portions come from the cooked batch weight at save time.</p>
+    <p class="hint">Weigh ingredients <b>raw</b> (g; for liquids use ml ≈ g). If you weighed one cooked, tap ⇄ to convert. A cooked batch weight at save time is optional — for dishes that lose or gain water in cooking.</p>
     ${draft.cookedTotalGrams ? `<label>Cooked batch weight (g)<input class="input" id="rb-cooked" type="number" step="any" value="${draft.cookedTotalGrams}"></label>` : ''}
     <div class="recipe-footer card">
       <div class="rf-line big"><span>Total</span><span><b>${fg(rawTotal)} g</b> · <b>${f0(totals.kcal)}</b> kcal</span></div>
-      <div class="rf-line"><span>Per 100g ${draft.cookedTotalGrams ? 'cooked' : '(raw — enter cooked weight at save)'}</span>
+      <div class="rf-line"><span>Per 100g ${draft.cookedTotalGrams && draft.cookedTotalGrams !== rawTotal ? 'cooked' : 'raw'}</span>
         <span>${f0(per100('kcal'))} kcal · ${fg(per100('protein'))}g protein</span></div>
       ${missingAny ? `<div class="rf-line warn">Some ingredients are missing data for: ${Object.keys(missing).join(', ')} — the label will show dashes there.</div>` : ''}
     </div>
@@ -1285,9 +1287,9 @@ function saveRecipeModal() {
   if (totals.kcal == null) { toast('An ingredient has no calorie data — fix it before saving'); return; }
 
   const { el, close } = openSheet(`
-    <div class="sheet-head"><h3>Cooked batch weight</h3><button class="icon-btn" data-close>✕</button></div>
-    <p class="hint">Weigh the finished batch and enter it here. Macros were computed from the <b>raw</b> ingredients (${fg(rawTotal)}g); portioning uses the <b>cooked</b> weight. This can't be skipped.</p>
-    <label>Cooked weight (g)*<input class="input" id="sr-cooked" type="number" inputmode="decimal" step="any" min="1" value="${draft.cookedTotalGrams || ''}" placeholder="e.g. 1240"></label>
+    <div class="sheet-head"><h3>Batch weight</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="hint">Everything weighed raw? Just hit save — portions use the raw total (${fg(rawTotal)}g). If you also weighed the <b>finished</b> batch (soups, rice dishes, anything that loses or gains water), enter that here for extra accuracy.</p>
+    <label>Cooked batch weight (g) — optional<input class="input" id="sr-cooked" type="number" inputmode="decimal" step="any" min="1" value="${draft.cookedTotalGrams && draft.cookedTotalGrams !== rawTotal ? draft.cookedTotalGrams : ''}" placeholder="blank = ${fg(rawTotal)}g raw total"></label>
     <h4>Custom servings (optional)</h4>
     <p class="hint">e.g. "1 burrito — 285g". Whole/half/quarter batch and g are added automatically.</p>
     <div id="sr-custom"></div>
@@ -1314,8 +1316,9 @@ function saveRecipeModal() {
   el.querySelector('#sr-add').onclick = () => { pull(); custom.push({ name: '', grams: 0 }); renderCustom(); };
 
   el.querySelector('#sr-save').onclick = async () => {
-    const cookedG = parseFloat(el.querySelector('#sr-cooked').value);
-    if (!cookedG || cookedG <= 0) { toast('Cooked weight is required'); return; }
+    // blank cooked weight = everything was weighed raw; portion on the raw total
+    const cookedG = parseFloat(el.querySelector('#sr-cooked').value) || rawTotal;
+    if (!cookedG || cookedG <= 0) { toast('Add ingredient weights first'); return; }
     pull();
     custom = custom.filter(s => s.name && s.grams > 0);
 
