@@ -4,7 +4,7 @@ import {
   scale, sumLoose, sumStrict, macroKcal,
   f0, f1, fg, escapeHtml as esc,
 } from './models.js';
-import { YIELDS } from './yields.js';
+import { YIELD_CATS } from './yields.js';
 import { scanBarcode, stopScan } from './scanner.js';
 
 // ---------------------------------------------------------------- state
@@ -1051,79 +1051,135 @@ function openLabel(recipe) {
 
 // ---------------------------------------------------------------- converter
 
-function converterHtml(idPrefix) {
-  return `
-    <div class="chips" id="${idPrefix}-dir">
-      <button class="chip on" data-dir="c2r">Cooked → Raw</button>
-      <button class="chip" data-dir="r2c">Raw → Cooked</button>
-    </div>
-    <label>Food<select class="input" id="${idPrefix}-food">
-      ${YIELDS.map((y, i) => `<option value="${i}">${esc(y.name)}</option>`).join('')}
-      <option value="custom">Custom factor…</option>
-    </select></label>
-    <label>Yield factor (cooked ÷ raw)<input class="input" id="${idPrefix}-factor" type="number" inputmode="decimal" step="any" value="${YIELDS[0].factor}"></label>
-    <label id="${idPrefix}-wlabel">Cooked weight (g)<input class="input" id="${idPrefix}-weight" type="number" inputmode="decimal" step="any" min="0" placeholder="0"></label>
-    <div class="card result-card"><div class="result-num" id="${idPrefix}-result">—</div><div class="result-sub" id="${idPrefix}-sub"></div></div>`;
+// One direction, like the original tool: weigh it after cooking, log it as raw.
+// State is shared between the tab and the recipe-builder modal so your last
+// pick (unit, category, item) sticks.
+let cvState = { unit: 'g', cat: 0, item: null, customLost: '30', weight: '' };
+
+function cvSelectedFactor() {
+  if (cvState.cat === 'custom') {
+    const L = parseFloat(cvState.customLost);
+    if (isNaN(L) || L >= 100 || L < 0) return null;
+    return 1 - L / 100;
+  }
+  if (cvState.item == null) return null;
+  const it = YIELD_CATS[cvState.cat]?.items[cvState.item];
+  return it ? it.y : null;
 }
 
-function wireConverter(root, idPrefix, onResult) {
-  let dir = 'c2r';
-  const $ = id => root.querySelector('#' + idPrefix + '-' + id);
+function cvItemLabel(it) {
+  const pct = it.y > 1
+    ? `+${Math.round((it.y - 1) * 100)}% gained`
+    : `${Math.round((1 - it.y) * 100)}% lost`;
+  return (it.approx ? '≈ ' : '') + pct;
+}
+
+function buildConverter(root, { onRaw = null } = {}) {
+  const compute = () => {
+    const w = parseFloat(cvState.weight);
+    const y = cvSelectedFactor();
+    if (!w || w <= 0 || !y) return null;
+    const cookedG = cvState.unit === 'oz' ? w * 28.35 : w;
+    return cookedG / y;
+  };
+
   const update = () => {
-    const factor = parseFloat($('factor').value);
-    const w = parseFloat($('weight').value);
-    if (!factor || !w) { $('result').textContent = '—'; $('sub').textContent = ''; if (onResult) onResult(null); return; }
-    const out = dir === 'c2r' ? w / factor : w * factor;
-    $('result').textContent = fg(out) + ' g ' + (dir === 'c2r' ? 'raw' : 'cooked');
-    $('sub').textContent = dir === 'c2r'
-      ? `${fg(w)}g cooked ÷ ${factor} = ${fg(out)}g raw`
-      : `${fg(w)}g raw × ${factor} = ${fg(out)}g cooked`;
-    if (onResult) onResult(out);
+    const num = root.querySelector('#cv2-num'), sub = root.querySelector('#cv2-sub');
+    const raw = compute();
+    if (raw == null) {
+      num.textContent = '—';
+      sub.textContent = 'Enter a weight and pick what you cooked.';
+      return;
+    }
+    const y = cvSelectedFactor();
+    const w = parseFloat(cvState.weight);
+    const cookedG = cvState.unit === 'oz' ? w * 28.35 : w;
+    const it = cvState.cat === 'custom' ? null : YIELD_CATS[cvState.cat].items[cvState.item];
+    const dry = it && it.y > 1 ? ' (dry)' : '';
+    num.innerHTML = `${fg(raw)}<span class="cv2-g"> g raw${dry}</span>`;
+    const what = it ? it.name : `custom, ${cvState.customLost}% lost`;
+    const inTxt = cvState.unit === 'oz' ? `${fg(w)}oz (${fg(cookedG)}g)` : `${fg(cookedG)}g`;
+    sub.textContent = `${inTxt} cooked ÷ ${y.toFixed(2)} = ${fg(raw)}g raw · ${what}`;
   };
-  root.querySelectorAll(`#${idPrefix}-dir .chip`).forEach(c => c.onclick = () => {
-    root.querySelectorAll(`#${idPrefix}-dir .chip`).forEach(x => x.classList.remove('on'));
-    c.classList.add('on');
-    dir = c.dataset.dir;
-    $('wlabel').firstChild.textContent = dir === 'c2r' ? 'Cooked weight (g)' : 'Raw weight (g)';
-    update();
-  });
-  $('food').onchange = e => {
-    if (e.target.value !== 'custom') $('factor').value = YIELDS[+e.target.value].factor;
+
+  const render = () => {
+    root.innerHTML = `
+      <h2>Cooked to raw</h2>
+      <p class="hint">Weigh it after cooking, log it as raw.</p>
+      <div class="cv2-input">
+        <div class="cv2-in-main">
+          <label>Cooked weight</label>
+          <input class="cv2-weight" id="cv2-weight" type="number" inputmode="decimal" step="any" min="0" placeholder="0">
+        </div>
+        <div class="cv2-units">
+          <button data-u="g" class="${cvState.unit === 'g' ? 'on' : ''}">grams</button>
+          <button data-u="oz" class="${cvState.unit === 'oz' ? 'on' : ''}">ounces</button>
+        </div>
+      </div>
+      <div class="cv2-result">
+        <label>Raw weight</label>
+        <div class="cv2-num" id="cv2-num">—</div>
+        <div class="cv2-sub" id="cv2-sub"></div>
+      </div>
+      ${onRaw ? '<button class="btn primary wide" id="cv2-use">Use raw grams</button>' : ''}
+      <h3 class="cv2-q">What did you cook?</h3>
+      <div class="chips-scroll">
+        ${YIELD_CATS.map((c, i) => `<button class="chip ${cvState.cat === i ? 'on' : ''}" data-cat="${i}">${esc(c.name)}</button>`).join('')}
+        <button class="chip ${cvState.cat === 'custom' ? 'on' : ''}" data-cat="custom">Custom</button>
+      </div>
+      ${cvState.cat === 'custom' ? `
+        <div class="cv2-custom">
+          <label>Weight lost in cooking (%)
+            <input class="input" id="cv2-lost" type="number" inputmode="decimal" step="any" min="0" max="99" value="${esc(cvState.customLost)}">
+          </label>
+          <p class="hint">Weigh a batch raw and again cooked to find your number: lost % = (1 − cooked ÷ raw) × 100.</p>
+        </div>` : `
+        <div class="cv2-items">
+          ${YIELD_CATS[cvState.cat].items.map((it, i) => `
+            <div class="cv2-item ${cvState.item === i ? 'sel' : ''}" data-i="${i}">
+              <span>${esc(it.name)}</span><span class="cv2-pct">${cvItemLabel(it)}</span>
+            </div>`).join('')}
+        </div>
+        ${YIELD_CATS[cvState.cat].note ? `<p class="hint tiny">${esc(YIELD_CATS[cvState.cat].note)}</p>` : ''}`}
+      <p class="hint tiny">Meat &amp; poultry factors are from the USDA Table of Cooking Yields. ≈ marks typical values where USDA has no measurement.</p>`;
+
+    const weightEl = root.querySelector('#cv2-weight');
+    weightEl.value = cvState.weight;
+    weightEl.oninput = e => { cvState.weight = e.target.value; update(); };
+    root.querySelectorAll('.cv2-units button').forEach(b => b.onclick = () => {
+      cvState.unit = b.dataset.u; render();
+    });
+    root.querySelectorAll('.chips-scroll .chip').forEach(b => b.onclick = () => {
+      const c = b.dataset.cat;
+      const next = c === 'custom' ? 'custom' : +c;
+      if (next !== cvState.cat) { cvState.cat = next; cvState.item = null; }
+      render();
+    });
+    root.querySelectorAll('.cv2-item').forEach(r => r.onclick = () => {
+      cvState.item = +r.dataset.i; render();
+    });
+    const lostEl = root.querySelector('#cv2-lost');
+    if (lostEl) lostEl.oninput = e => { cvState.customLost = e.target.value; update(); };
+    const useBtn = root.querySelector('#cv2-use');
+    if (useBtn) useBtn.onclick = () => {
+      const raw = compute();
+      if (raw == null) { toast('Enter a weight and pick what you cooked'); return; }
+      onRaw(raw);
+    };
     update();
   };
-  $('factor').oninput = update;
-  $('weight').oninput = update;
+
+  render();
 }
 
 function renderConverter() {
-  const scr = document.getElementById('screen-convert');
-  scr.innerHTML = `
-    <h2>Cooked ⇄ Raw</h2>
-    <p class="hint">Convert between cooked and raw weights using typical yield factors. The same converter is available inside the recipe builder (⇄) for ingredients you weighed cooked.</p>
-    ${converterHtml('cv')}`;
-  wireConverter(scr, 'cv', null);
+  buildConverter(document.getElementById('screen-convert'));
 }
 
 // modal version used from the recipe builder; cb receives the RAW grams
 function converterModal(cb) {
-  let lastRaw = null;
-  const { el, close } = openSheet(`
-    <div class="sheet-head"><h3>Cooked ⇄ Raw</h3><button class="icon-btn" data-close>✕</button></div>
-    ${converterHtml('cm')}
-    <button class="btn primary wide" id="cm-use">Use raw grams</button>`);
-  let dirIsC2R = true;
-  el.querySelectorAll('#cm-dir .chip').forEach(c => {
-    const orig = c.onclick;
-    c.addEventListener('click', () => { dirIsC2R = c.dataset.dir === 'c2r'; });
-  });
-  wireConverter(el, 'cm', out => { lastRaw = out; });
-  el.querySelector('#cm-use').onclick = () => {
-    if (lastRaw == null) { toast('Enter a weight first'); return; }
-    // if converting raw→cooked, "raw grams" is the input weight
-    const raw = dirIsC2R ? lastRaw : parseFloat(el.querySelector('#cm-weight').value);
-    close();
-    cb(raw);
-  };
+  const { el, close } = openSheet('<div class="cv2-sheet"></div>', { full: true });
+  buildConverter(el.querySelector('.cv2-sheet'), { onRaw: raw => { close(); cb(raw); } });
 }
 
 // ---------------------------------------------------------------- settings

@@ -267,11 +267,55 @@ label { display: block; font-size: 13px; color: var(--dim); font-weight: 600; }
 .rf-line.big { font-size: 16px; color: var(--text); }
 .rf-line.warn { color: var(--c-energy); font-size: 13px; }
 
-/* ---- converter ---- */
+/* ---- cooked → raw converter ---- */
 
-.result-card { text-align: center; padding: 20px; }
-.result-num { font-size: 30px; font-weight: 800; color: var(--accent); }
-.result-sub { font-size: 13px; color: var(--dim); margin-top: 6px; }
+.cv2-input {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px 16px; margin: 12px 0;
+}
+.cv2-in-main { flex: 1; min-width: 0; }
+.cv2-weight {
+  width: 100%; background: none; border: none; outline: none;
+  color: var(--text); font-size: 36px; font-weight: 800; padding: 2px 0;
+  font-family: inherit;
+}
+.cv2-weight::placeholder { color: var(--dim); opacity: .45; }
+.cv2-units { display: flex; flex-direction: column; gap: 6px; }
+.cv2-units button {
+  background: var(--card-2); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 6px 16px; font-size: 13px; font-weight: 700; cursor: pointer;
+}
+.cv2-units button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+.cv2-result {
+  background: var(--card-2); border: 1px solid var(--accent);
+  border-radius: var(--radius); padding: 14px 16px; margin-bottom: 8px;
+}
+.cv2-num { font-size: 36px; font-weight: 800; color: var(--accent); margin: 4px 0 2px; min-height: 44px; }
+.cv2-g { font-size: 17px; color: var(--dim); font-weight: 600; }
+.cv2-sub { font-size: 13px; color: var(--dim); line-height: 1.4; }
+
+.cv2-q { font-size: 16px; margin: 16px 0 2px; }
+.chips-scroll {
+  display: flex; gap: 8px; overflow-x: auto; padding: 10px 0;
+  -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+.chips-scroll::-webkit-scrollbar { display: none; }
+.chips-scroll .chip { flex: 0 0 auto; }
+
+.cv2-items { margin-bottom: 8px; }
+.cv2-item {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 13px 4px; border-bottom: 1px solid var(--line);
+  font-size: 15px; cursor: pointer;
+}
+.cv2-item .cv2-pct { color: var(--dim); font-size: 13px; white-space: nowrap; }
+.cv2-item.sel { color: var(--accent); font-weight: 700; }
+.cv2-item.sel .cv2-pct { color: var(--accent); }
+.cv2-custom { margin-top: 10px; }
+.hint.tiny { font-size: 11.5px; }
 
 /* ---- scanner ---- */
 
