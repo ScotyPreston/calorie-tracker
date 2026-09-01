@@ -5,7 +5,7 @@ import {
   f0, f1, fg, escapeHtml as esc,
 } from './models.js';
 import { YIELD_CATS } from './yields.js';
-import { scanBarcode, stopScan } from './scanner.js';
+import { scanBarcode, codeCandidates } from './scanner.js';
 
 // ---------------------------------------------------------------- state
 
@@ -405,8 +405,12 @@ function openFoodDetail(food, ctx = {}) {
     if (gsel) gsel.onchange = e => { group = e.target.value; };
     overlayBack.querySelector('#fd-time').onchange = e => { timeVal = e.target.value; };
     overlayBack.querySelector('#fd-star').onclick = async () => {
+      // starring means "keep this food" — persist immediately, even before it's logged
       food.favorite = !food.favorite;
-      if (!food._unsaved) { await DB.put('foods', food); await refreshFoods(); }
+      delete food._unsaved;
+      if (!food.lastUsed) food.lastUsed = new Date().toISOString();
+      await DB.put('foods', food);
+      await refreshFoods();
       overlayBack.querySelector('#fd-star').classList.toggle('on', food.favorite);
     };
     const editBtn = overlayBack.querySelector('#fd-edit');
@@ -596,47 +600,70 @@ function openFoodForm(existing, { barcode = '', onSaved = null } = {}) {
 // ---------------------------------------------------------------- barcode flow
 
 async function scanFlow(onPick = null) {
-  let code;
+  let hit;
   try {
-    code = await scanBarcode();
+    hit = await scanBarcode();
   } catch (err) {
-    alert(err.message + '\n\nOn iPhone: Settings → Safari → Camera must be allowed, and the site must be HTTPS.');
+    alert(err.message);
     return;
   }
-  if (!code) return;
-  const food = await lookupBarcode(code);
+  if (!hit) return;
+  // zxing-cpp reports UPC-A as EAN-13 "0"+UPC; try the normalized code AND the raw read
+  const candidates = codeCandidates(hit.text, hit.format);
+  const food = await lookupBarcode(candidates);
   if (food) {
     if (onPick) onPick(food);
     else openFoodDetail(food, { date: currentDate });
   } else {
-    if (confirm(`Barcode ${code} not found in Open Food Facts.\n\nEnter it manually from the nutrition label?`)) {
-      openFoodForm(null, { barcode: code, onSaved: onPick || undefined });
+    if (confirm(`Barcode ${candidates[0]} not found in Open Food Facts.\n\nEnter it manually from the nutrition label?`)) {
+      openFoodForm(null, { barcode: candidates[0], onSaved: onPick || undefined });
     }
   }
 }
 
-// local database first (instant + offline), then cache, then Open Food Facts
-async function lookupBarcode(code) {
-  const local = await DB.byIndex('foods', 'barcode', code);
-  if (local.length) return local[0];
+// Scanned foods are saved to the database IMMEDIATELY (not just on "Add to Diary"),
+// so they show up in Recents and survive even if you only looked at them.
+async function saveScannedFood(food) {
+  delete food._unsaved;
+  food.lastUsed = new Date().toISOString();
+  await DB.put('foods', food);
+  await refreshFoods();
+  return foodsById.get(food.id);
+}
 
-  const cached = await DB.get('scanCache', code);
-  if (cached) return { ...cached.food, id: uuid(), _unsaved: true };
-
-  let data;
-  try {
-    const resp = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
-    if (!resp.ok) return null;
-    data = await resp.json();
-  } catch (e) {
-    toast('No connection — Open Food Facts lookup failed');
-    return null;
+// local database first (instant + offline), then the lookup cache, then Open Food Facts
+async function lookupBarcode(candidates) {
+  for (const code of candidates) {
+    const local = await DB.byIndex('foods', 'barcode', code);
+    if (local.length) {
+      const f = local[0];
+      f.lastUsed = new Date().toISOString(); // a scan counts as recent use
+      await DB.put('foods', f);
+      await refreshFoods();
+      return foodsById.get(f.id);
+    }
   }
-  if (!data || data.status !== 1 || !data.product) return null;
-  const food = offToFood(data.product, code);
-  if (!food) return null;
-  await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString() });
-  return { ...food, _unsaved: true };
+  for (const code of candidates) {
+    const cached = await DB.get('scanCache', code);
+    if (cached) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
+  }
+  for (const code of candidates) {
+    let data;
+    try {
+      const resp = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
+      if (!resp.ok) continue;
+      data = await resp.json();
+    } catch (e) {
+      toast('No connection — Open Food Facts lookup failed');
+      return null;
+    }
+    if (!data || data.status !== 1 || !data.product) continue;
+    const food = offToFood(data.product, code);
+    if (!food) continue;
+    await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString() });
+    return saveScannedFood(food);
+  }
+  return null;
 }
 
 function offToFood(p, barcode) {

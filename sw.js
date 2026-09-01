@@ -1,6 +1,6 @@
 // Service worker: cache the app shell so the tracker works fully offline.
 // Bump VERSION on every deploy so clients pick up new files.
-const VERSION = 'ct-v3';
+const VERSION = 'ct-v4';
 
 const SHELL = [
   './',
@@ -11,6 +11,8 @@ const SHELL = [
   './js/models.js',
   './js/yields.js',
   './js/scanner.js',
+  './zxing-wasm/zxing-reader.js',
+  './zxing-wasm/zxing_reader.wasm',
   './manifest.webmanifest',
   './icons/icon-180.png',
   './icons/icon-512.png',
