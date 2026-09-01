@@ -8,7 +8,7 @@ import { YIELD_CATS } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 
 // ---------------------------------------------------------------- state
 
@@ -530,15 +530,18 @@ function fileToJpegB64(file, maxSide = 1568) {
 
 async function readLabelPhoto(file) {
   const b64 = await fileToJpegB64(file);
+  const headers = {
+    'content-type': 'application/json',
+    'x-api-key': settings.anthropicKey,
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'server-side-fallback-2026-07-01',
+    'anthropic-dangerous-direct-browser-access': 'true',
+  };
+  // identity-linked API keys must say which workspace the request acts in
+  if (settings.anthropicWorkspace) headers['anthropic-workspace-id'] = settings.anthropicWorkspace;
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': settings.anthropicKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'server-side-fallback-2026-07-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
+    headers,
     body: JSON.stringify({
       model: 'claude-opus-5',
       max_tokens: 2048,
@@ -555,7 +558,11 @@ async function readLabelPhoto(file) {
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => null);
-    throw new Error(err?.error?.message || ('HTTP ' + resp.status));
+    const msg = err?.error?.message || ('HTTP ' + resp.status);
+    if (/workspace-id/i.test(msg)) {
+      throw new Error('your API key needs a Workspace ID. In Settings, fill the "Workspace ID" box: get it at console.anthropic.com → Settings → Workspaces → tap your workspace → copy the ID (starts with wrkspc_).');
+    }
+    throw new Error(msg);
   }
   const msg = await resp.json();
   if (msg.stop_reason === 'refusal') throw new Error('the model declined to read this image');
@@ -1524,6 +1531,7 @@ function renderSettings() {
       <h4>Label photo reading (Claude)</h4>
       <p class="hint">The 🏷 Label photo button reads a nutrition facts label from your camera roll and fills the food in for you. Uses your own Claude API key (console.anthropic.com → API Keys, ~a cent per label, billed to your account). The key is stored only on this device.</p>
       <label>Claude API key<input class="input" id="st-claude" value="${esc(settings.anthropicKey || '')}" placeholder="sk-ant-…"></label>
+      <label>Workspace ID (only if the app asks for it)<input class="input" id="st-claude-ws" value="${esc(settings.anthropicWorkspace || '')}" placeholder="wrkspc_…"></label>
     </div>
     <div class="card">
       <h4>Restaurant menus (Nutritionix)</h4>
@@ -1585,6 +1593,7 @@ function renderSettings() {
       key: scr.querySelector('#st-nix-key').value.trim(),
     };
     settings.anthropicKey = scr.querySelector('#st-claude').value.trim();
+    settings.anthropicWorkspace = scr.querySelector('#st-claude-ws').value.trim();
     await saveSettings();
     toast('Settings saved');
   };
