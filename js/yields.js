@@ -57,9 +57,10 @@ const CAT_GUESSES = [
   [/ground|hamburger|meatloaf/i, 'Ground meat'],
   [/bacon|sausage|brat/i, 'Bacon & sausage'],
   [/chicken|drumstick|wing/i, 'Chicken'],
+  // pork before steak: "pork loin roast" must not fall into Steak & roast via "roast"
+  [/pork|\bham\b/i, 'Pork'],
   [/steak|sirloin|ribeye|filet|brisket|beef|roast/i, 'Steak & roast'],
   [/potato/i, 'Potatoes'],
-  [/pork|ham\b|loin|rib/i, 'Pork'],
   [/salmon|tilapia|cod|haddock|tuna|shrimp|fish/i, 'Fish & seafood'],
   [/rice|pasta|quinoa|lentil|bean|noodle|spaghetti|penne|macaroni/i, 'Rice & pasta'],
   [/mushroom|spinach|onion|broccoli|carrot|zucchini|squash|cauliflower|asparagus|pepper|vegetable|veggie/i, 'Vegetables'],

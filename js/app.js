@@ -461,14 +461,14 @@ function openFoodDetail(food, ctx = {}) {
             ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${esc(s.name)} (${fg(s.grams)}g)</option>`).join('')}
           </select></label>
         </div>
-        <div class="fd-weigh">
+        ${food.source === 'recipe' ? '' : `<div class="fd-weigh">
           <span class="fd-weigh-label">Weighed</span>
           <button class="chip ${weighMode === 'raw' ? 'on' : ''}" id="fd-w-raw">🥄 Raw</button>
           <button class="chip ${weighMode === 'cooked' ? 'on' : ''}" id="fd-w-cooked">🔥 Cooked</button>
           ${isCooked ? `<button class="cook-pill" id="fd-method">${esc(cookMethod.label)} ${cookMethod.factor > 1
             ? `+${Math.round((cookMethod.factor - 1) * 100)}%`
             : `−${Math.round((1 - cookMethod.factor) * 100)}%`}</button>` : ''}
-        </div>
+        </div>`}
         <div class="fd-controls">
           ${settings.groupsEnabled ? `<label>Meal<select class="input" id="fd-group">
             ${GROUPS.map(g => `<option ${g === group ? 'selected' : ''}>${g}</option>`).join('')}
@@ -509,8 +509,12 @@ function openFoodDetail(food, ctx = {}) {
       if (!y) { weighMode = 'raw'; } else { cookMethod = y; weighMode = 'cooked'; }
       render();
     }, guessYieldCat(food.name) ?? 0);
-    overlayBack.querySelector('#fd-w-raw').onclick = () => { weighMode = 'raw'; render(); };
-    overlayBack.querySelector('#fd-w-cooked').onclick = () => {
+    // recipes have no Raw/Cooked toggle: their per-gram nutrition is already per
+    // cooked gram, so converting again would double-count the cooking loss
+    const rawBtn = overlayBack.querySelector('#fd-w-raw');
+    if (rawBtn) rawBtn.onclick = () => { weighMode = 'raw'; render(); };
+    const cookedBtn = overlayBack.querySelector('#fd-w-cooked');
+    if (cookedBtn) cookedBtn.onclick = () => {
       if (cookMethod) { weighMode = 'cooked'; render(); } else pickMethod();
     };
     const methodBtn = overlayBack.querySelector('#fd-method');
