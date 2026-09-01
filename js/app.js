@@ -725,22 +725,33 @@ function usdaSearchSheet(onPick) {
     const key = settings.usdaKey || 'DEMO_KEY';
     let data;
     try {
-      const resp = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=25&dataType=Foundation,SR%20Legacy,Branded`);
+      const resp = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=30&dataType=Foundation,SR%20Legacy,Survey%20%28FNDDS%29,Branded`);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       data = await resp.json();
     } catch (e) {
-      el.querySelector('#us-list').innerHTML = `<div class="empty-line">Search failed (${esc(e.message)}). Check connection or API key in Settings.</div>`;
+      const throttled = /429|400/.test(e.message) && !settings.usdaKey;
+      el.querySelector('#us-list').innerHTML = `<div class="empty-line">${throttled
+        ? 'The shared DEMO_KEY is rate-limited right now. Get your own free key at fdc.nal.usda.gov/api-key-signup and paste it in Settings — takes one minute.'
+        : `Search failed (${esc(e.message)}). Check connection or API key in Settings.`}</div>`;
       return;
     }
     const results = (data.foods || []).filter(x => x.foodNutrients?.length);
-    el.querySelector('#us-list').innerHTML = results.map((r, i) => `
+    const srcLabel = (r) => r.dataType === 'Branded' ? (r.brandOwner || 'Branded') : 'USDA';
+    el.querySelector('#us-list').innerHTML = results.map((r, i) => {
+      const k = usdaKcal100(r);
+      return `
       <div class="food-row" data-i="${i}">
         <div class="food-main"><div class="food-name">${esc(r.description)}</div>
-        <div class="food-sub">${esc(r.dataType)}${r.brandOwner ? ' · ' + esc(r.brandOwner) : ''}</div></div>
-      </div>`).join('') || '<div class="empty-line">No results.</div>';
-    el.querySelectorAll('.food-row').forEach(row => row.onclick = () => {
-      const food = usdaToFood(results[+row.dataset.i]);
-      if (!food) { toast('That record has no usable nutrition data'); return; }
+        <div class="food-sub">${esc(srcLabel(r))}${k != null ? ` · ${Math.round(k * 100)} kcal/100g` : ''}</div></div>
+      </div>`;
+    }).join('') || '<div class="empty-line">No results.</div>';
+    el.querySelectorAll('.food-row').forEach(row => row.onclick = async () => {
+      const r = results[+row.dataset.i];
+      const sub = row.querySelector('.food-sub');
+      sub.textContent = 'Loading serving sizes…';
+      row.style.pointerEvents = 'none';
+      const food = await usdaToFood(r, key);
+      if (!food) { toast('That record has no usable nutrition data'); row.style.pointerEvents = ''; return; }
       close();
       onPick(food);
     });
@@ -750,13 +761,51 @@ function usdaSearchSheet(onPick) {
   setTimeout(() => el.querySelector('#us-q').focus(), 50);
 }
 
-function usdaToFood(r) {
+// kcal per gram from a search result (1008 = Energy kcal; 2047/2048 = Atwater energy)
+function usdaKcal100(r) {
+  const byId = {};
+  for (const n of r.foodNutrients || []) byId[n.nutrientId] = n.value;
+  const v = byId[1008] ?? byId[2047] ?? byId[2048];
+  return (typeof v === 'number') ? v / 100 : null;
+}
+
+// The search response has nutrition per 100g but NO portion weights — without them
+// a Big Mac opens as "1 oz = 73 kcal". The /food/{id} detail endpoint carries the
+// real household portions ("1 McDonald's Big Mac — 205g"), so fetch and use them.
+async function usdaFetchPortions(fdcId, key) {
+  try {
+    const resp = await fetch(`https://api.nal.usda.gov/fdc/v1/food/${fdcId}?api_key=${encodeURIComponent(key)}`);
+    if (!resp.ok) return [];
+    const d = await resp.json();
+    const out = [];
+    for (const p of d.foodPortions || []) {
+      const g = parseFloat(p.gramWeight);
+      if (!g || g <= 0) continue;
+      let name = (p.portionDescription || '').trim();
+      if (/quantity not specified/i.test(name)) continue;
+      if (!name) {
+        const amt = (p.amount && p.amount !== 1) ? fg(p.amount) + ' ' : '';
+        const unit = (p.measureUnit?.name && p.measureUnit.name !== 'undetermined') ? p.measureUnit.name + ' ' : '';
+        name = (amt + unit + (p.modifier || '')).trim();
+      }
+      if (!name || /^\d+$/.test(name)) continue; // FNDDS numeric portion codes are not names
+      name = name.replace(/^1\s+(?!\/)/, ''); // "1 McDonald's Big Mac" + Amount field would read "1 1 …"
+      if (out.length >= 6 || out.some(s => s.name.toLowerCase() === name.toLowerCase())) continue;
+      out.push({ name: name.slice(0, 40), grams: g });
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function usdaToFood(r, key) {
   // search results report nutrients per 100 g
   const byId = {};
   for (const n of r.foodNutrients || []) byId[n.nutrientId] = n.value;
   const per100 = (id) => (typeof byId[id] === 'number') ? byId[id] / 100 : null;
   const perGram = {
-    kcal: per100(1008),
+    kcal: usdaKcal100(r),
     protein: per100(1003),
     carbs: per100(1005),
     fat: per100(1004),
@@ -770,8 +819,8 @@ function usdaToFood(r) {
       perGram.kcal = (perGram.protein ?? 0) * 4 + (perGram.carbs ?? 0) * 4 + (perGram.fat ?? 0) * 9;
     } else return null;
   }
-  const servings = [];
-  if (r.servingSize > 0 && /^(g|grm|gram)/i.test(r.servingSizeUnit || '')) {
+  const servings = await usdaFetchPortions(r.fdcId, key || 'DEMO_KEY');
+  if (!servings.length && r.servingSize > 0 && /^(g|grm|gram)/i.test(r.servingSizeUnit || '')) {
     servings.push({ name: (r.householdServingFullText || 'serving').trim(), grams: r.servingSize });
   }
   servings.push({ name: 'oz', grams: 28.35 });
