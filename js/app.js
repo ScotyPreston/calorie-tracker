@@ -7,6 +7,9 @@ import {
 import { YIELD_CATS } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
+// keep in sync with VERSION in sw.js
+const APP_VERSION = 'v8';
+
 // ---------------------------------------------------------------- state
 
 let foods = [];
@@ -38,7 +41,21 @@ async function boot() {
   navTo('dashboard');
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => { /* offline dev, fine */ });
+    navigator.serviceWorker.register('./sw.js').then(reg => {
+      // iOS PWAs are lazy about update checks — force one on open and on re-focus
+      reg.update().catch(() => {});
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      });
+    }).catch(() => { /* offline dev, fine */ });
+    // when a new version takes over, refresh once so it shows immediately
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return;
+      reloaded = true;
+      window.location.reload();
+    });
   }
 }
 
@@ -1516,6 +1533,11 @@ function renderSettings() {
     </div>
     <button class="btn primary wide" id="st-save">Save settings</button>
     <div class="card">
+      <h4>App version</h4>
+      <p class="hint">App ${APP_VERSION} · <span id="st-sw">checking cache…</span></p>
+      <button class="btn wide" id="st-update">↻ Check for updates</button>
+    </div>
+    <div class="card">
       <h4>Backup</h4>
       <p class="hint">All data lives on this device only. iOS can evict site storage — export regularly.</p>
       <button class="btn wide" id="st-export">⬇ Export all data to JSON</button>
@@ -1528,6 +1550,26 @@ function renderSettings() {
     scr.querySelector('#st-stats').textContent =
       `${foods.length} foods (${foods.filter(f => f.source === 'recipe').length} recipes) · ${log.length} log entries`;
   });
+
+  if ('caches' in window) {
+    caches.keys().then(keys => {
+      const v = keys.find(k => k.startsWith('ct-'));
+      const el = scr.querySelector('#st-sw');
+      if (el) el.textContent = v ? 'cached ' + v : 'not cached yet';
+    }).catch(() => {});
+  }
+  scr.querySelector('#st-update').onclick = async () => {
+    toast('Checking for updates…');
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) { toast('Not installed as an app yet — just reload the page'); return; }
+      await reg.update();
+      if (reg.installing || reg.waiting) toast('Update found — installing. The app will refresh itself in a moment.');
+      else toast('You are on the latest version');
+    } catch (e) {
+      toast('Update check failed — are you online?');
+    }
+  };
 
   scr.querySelector('#st-save').onclick = async () => {
     settings.targets = {
