@@ -26,3 +26,5 @@ HTTPS (which Netlify provides) is required for the camera/barcode scanner.
 ## Update a deployed version
 
 Edit files, bump `VERSION` in `sw.js` (so installed phones pick up the change), re-drop the folder on Netlify.
+
+
