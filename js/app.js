@@ -241,6 +241,7 @@ function renderFoodsScreen() {
     <h2>Foods</h2>
     <div class="row gap">
       <button class="btn small" id="foods-scan">📷 Scan</button>
+      <button class="btn small" id="foods-label">🏷 Label photo</button>
       <button class="btn small" id="foods-usda">🔎 Search</button>
       <button class="btn small" id="foods-new">✏️ New food</button>
     </div>
@@ -275,6 +276,7 @@ function renderFoodsScreen() {
   scr.querySelector('#foods-search').oninput = (e) => { foodsFilter.q = e.target.value; renderList(); };
   scr.querySelectorAll('.chip').forEach(c => c.onclick = () => { foodsFilter.tab = c.dataset.tab; renderFoodsScreen(); });
   scr.querySelector('#foods-scan').onclick = () => scanFlow();
+  scr.querySelector('#foods-label').onclick = () => pickLabelPhoto();
   scr.querySelector('#foods-usda').onclick = () => usdaSearchSheet(food => openFoodDetail(food, { date: currentDate }));
   scr.querySelector('#foods-new').onclick = () => openFoodForm(null);
 }
@@ -285,6 +287,7 @@ function pickFood(onPick) {
     <div class="sheet-head"><h3>Choose a food</h3><button class="icon-btn" data-close>✕</button></div>
     <div class="row gap">
       <button class="btn small" id="pf-scan">📷 Scan</button>
+      <button class="btn small" id="pf-label">🏷 Label</button>
       <button class="btn small" id="pf-usda">🔎 Search</button>
       <button class="btn small" id="pf-new">✏️ New</button>
     </div>
@@ -304,6 +307,7 @@ function pickFood(onPick) {
   renderList('');
   el.querySelector('#pf-search').oninput = e => renderList(e.target.value);
   el.querySelector('#pf-scan').onclick = () => { close(); scanFlow(onPick); };
+  el.querySelector('#pf-label').onclick = () => { close(); pickLabelPhoto(onPick); };
   el.querySelector('#pf-usda').onclick = () => { close(); usdaSearchSheet(onPick); };
   el.querySelector('#pf-new').onclick = () => { close(); openFoodForm(null, { onSaved: onPick }); };
 }
@@ -481,22 +485,133 @@ async function addLogEntry(food, { grams, amount, servingName, date, group, time
   });
 }
 
+// ---------------------------------------------------------------- label photo → Claude vision
+
+const LABEL_PROMPT = `Read the nutrition facts label in this photo. Reply with ONLY a JSON object, no other text, in exactly this shape:
+{"name": "product name if visible, else null", "brand": "brand if visible, else null", "serving_name": "the household serving unit, e.g. bag / 2 tbsp / 1 cup / 28 chips", "serving_grams": 32, "per_serving": {"kcal": 140, "protein_g": 19, "carbs_g": 5, "fat_g": 5, "fiber_g": 1, "sugar_g": 1, "sat_fat_g": null, "sodium_mg": 290}}
+Rules: every value must be per ONE serving exactly as printed on the label. serving_grams is the gram weight printed next to the serving size (e.g. 32 from "(32g)"); null if the label doesn't print one. Use null for any nutrient the label does not list — never guess, estimate, or compute a missing value. If the photo contains no readable nutrition facts label, reply {"error": "what you see instead"}.`;
+
+function fileToJpegB64(file, maxSide = 1568) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const s = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * s);
+        c.height = Math.round(img.naturalHeight * s);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        res(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+      } catch (e) { rej(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('could not open that photo')); };
+    img.src = url;
+  });
+}
+
+async function readLabelPhoto(file) {
+  const b64 = await fileToJpegB64(file);
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': settings.anthropicKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'server-side-fallback-2026-07-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-5',
+      max_tokens: 2048,
+      output_config: { effort: 'low' },
+      fallbacks: 'default',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+          { type: 'text', text: LABEL_PROMPT },
+        ],
+      }],
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => null);
+    throw new Error(err?.error?.message || ('HTTP ' + resp.status));
+  }
+  const msg = await resp.json();
+  if (msg.stop_reason === 'refusal') throw new Error('the model declined to read this image');
+  const text = (msg.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('no label data found in the reply');
+  const data = JSON.parse(m[0]);
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+// opens the iOS photo library / camera picker (native behavior of a file input)
+function pickLabelPhoto(onPick = null) {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  inp.onchange = () => { if (inp.files && inp.files[0]) labelPhotoFlow(inp.files[0], onPick); };
+  inp.click();
+}
+
+async function labelPhotoFlow(file, onPick = null) {
+  if (!settings.anthropicKey) {
+    alert('Label photo reading needs your Claude API key.\n\nGet one at console.anthropic.com → API Keys, then paste it in Settings. It stays on this phone.');
+    navTo('settings');
+    return;
+  }
+  toast('Reading label…');
+  let data;
+  try {
+    data = await readLabelPhoto(file);
+  } catch (e) {
+    alert('Could not read the label: ' + e.message);
+    return;
+  }
+  const sg = parseFloat(data.serving_grams) || 0;
+  const basis = sg || 100;
+  const ps = data.per_serving || {};
+  const num = (v) => (typeof v === 'number' && isFinite(v)) ? v / basis : null;
+  const prefill = {
+    id: uuid(),
+    name: [data.name, data.brand && data.name && !String(data.name).toLowerCase().includes(String(data.brand).toLowerCase()) ? `(${data.brand})` : '']
+      .filter(Boolean).join(' ').trim() || (data.brand || ''),
+    barcode: null, source: 'manual',
+    perGram: {
+      kcal: num(ps.kcal), protein: num(ps.protein_g), carbs: num(ps.carbs_g), fat: num(ps.fat_g),
+      fiber: num(ps.fiber_g), sugar: num(ps.sugar_g), sodium: num(ps.sodium_mg), satFat: num(ps.sat_fat_g),
+    },
+    servings: [{ name: (data.serving_name || 'serving').replace(/^1\s+(?!\/)/, ''), grams: basis }, { name: 'g', grams: 1 }],
+    defaultServing: (data.serving_name || 'serving').replace(/^1\s+(?!\/)/, ''),
+    defaultAmount: 1, favorite: false, lastUsed: null,
+  };
+  if (prefill.perGram.kcal == null) { alert('The label photo had no readable calories — try a straighter, closer shot.'); return; }
+  if (!sg) toast('Label had no gram weight — double-check the serving grams field');
+  openFoodForm(null, { prefill, onSaved: onPick || undefined });
+}
+
 // ---------------------------------------------------------------- manual food form
 
-function openFoodForm(existing, { barcode = '', onSaved = null } = {}) {
+function openFoodForm(existing, { barcode = '', onSaved = null, prefill = null } = {}) {
   const isEdit = !!existing;
-  const f = existing || {
+  const f = existing || prefill || {
     id: uuid(), name: '', barcode, source: 'manual',
     perGram: Object.fromEntries(NUTRIENTS.map(k => [k, null])),
     servings: [{ name: 'serving', grams: 100 }, { name: 'g', grams: 1 }],
     defaultServing: 'serving', defaultAmount: 1, favorite: false, lastUsed: null,
   };
+  const filled = isEdit || !!prefill; // prefill = values read from a label photo, shown for review
   // basis serving for entering label values
   let basis = (f.servings || []).find(s => s.name !== 'g') || { name: 'g', grams: 100 };
-  let basisGrams = isEdit ? basis.grams : basis.grams;
+  let basisGrams = basis.grams;
 
   const val = (k) => {
-    if (!isEdit) return '';
+    if (!filled) return '';
     const v = f.perGram[k];
     if (v == null) return '';
     const x = v * basisGrams * (k === 'sodium' ? 1 : 1);
@@ -1389,6 +1504,11 @@ function renderSettings() {
       <label>API key<input class="input" id="st-usda" value="${esc(settings.usdaKey)}" placeholder="DEMO_KEY (default)"></label>
     </div>
     <div class="card">
+      <h4>Label photo reading (Claude)</h4>
+      <p class="hint">The 🏷 Label photo button reads a nutrition facts label from your camera roll and fills the food in for you. Uses your own Claude API key (console.anthropic.com → API Keys, ~a cent per label, billed to your account). The key is stored only on this device.</p>
+      <label>Claude API key<input class="input" id="st-claude" value="${esc(settings.anthropicKey || '')}" placeholder="sk-ant-…"></label>
+    </div>
+    <div class="card">
       <h4>Restaurant menus (Nutritionix)</h4>
       <p class="hint">Official menu numbers for 800+ chains — a Big Mac shows 580, straight from McDonald's published data. Sign up free at developer.nutritionix.com, then paste both values. Also used as a barcode-lookup backup.</p>
       <label>Application ID<input class="input" id="st-nix-id" value="${esc(settings.nutritionix?.id || '')}"></label>
@@ -1422,6 +1542,7 @@ function renderSettings() {
       id: scr.querySelector('#st-nix-id').value.trim(),
       key: scr.querySelector('#st-nix-key').value.trim(),
     };
+    settings.anthropicKey = scr.querySelector('#st-claude').value.trim();
     await saveSettings();
     toast('Settings saved');
   };
