@@ -184,6 +184,21 @@ export const YIELD_CATS = [
     note: 'Raw = DRY weight. Grains vary with how much water you use — weigh your usual batch once for a precise personal factor.',
   },
   {
+    name: 'Baked & whole dishes',
+    items: [
+      { name: 'Cheesecake, baked', y: 0.90, approx: true },
+      { name: 'Cake / muffins / brownies', y: 0.88, approx: true },
+      { name: 'Banana / quick bread', y: 0.88, approx: true },
+      { name: 'Bread, baked', y: 0.87, approx: true },
+      { name: 'Casserole / pasta bake', y: 0.85, approx: true },
+      { name: 'Lasagna', y: 0.85, approx: true },
+      { name: 'Meatloaf, baked', y: 0.70 },
+      { name: 'Soup / stew, simmered uncovered', y: 0.85, approx: true },
+      { name: 'Slow cooker (lid on)', y: 0.95, approx: true },
+    ],
+    note: 'Whole-dish baking losses are typical values (ovens and bake times vary) — weighing the finished dish once beats any estimate.',
+  },
+  {
     name: 'Vegetables',
     items: [
       { name: 'Vegetables, roasted', y: 0.80, approx: true },

@@ -8,7 +8,7 @@ import { YIELD_CATS, guessYield } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v14';
+const APP_VERSION = 'v15';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -1247,7 +1247,7 @@ async function usdaToFood(r, key) {
 
 // ---------------------------------------------------------------- recipes
 
-function computeRecipe(ingredients) {
+function computeRecipe(ingredients, batchYield = null) {
   const names = ingredients.map(i => i.name);
   const rows = ingredients.map(i => {
     const f = foodsById.get(i.foodId);
@@ -1255,10 +1255,13 @@ function computeRecipe(ingredients) {
   });
   const { totals, missing } = sumStrict(rows, names);
   const rawTotal = ingredients.reduce((s, i) => s + (+i.grams || 0), 0);
-  // estimated cooked batch weight: each ingredient's raw grams × its cook-method
-  // yield factor (USDA-based); un-cooked ingredients pass through at ×1
-  const estCooked = ingredients.reduce((s, i) => s + (+i.grams || 0) * (i.yield ? i.yield.factor : 1), 0);
-  const anyYield = ingredients.some(i => i.yield);
+  // estimated cooked batch weight. A whole-batch method (cheesecake, casserole —
+  // the dish cooks as one thing) applies to the raw total and wins over the
+  // per-ingredient path (each ingredient's raw grams × its USDA yield factor).
+  const estCooked = batchYield
+    ? rawTotal * batchYield.factor
+    : ingredients.reduce((s, i) => s + (+i.grams || 0) * (i.yield ? i.yield.factor : 1), 0);
+  const anyYield = !!batchYield || ingredients.some(i => i.yield);
   return { totals, missing, rawTotal, rows, estCooked, anyYield };
 }
 
@@ -1270,8 +1273,8 @@ function cookPillText(ing) {
 }
 
 // pick how one ingredient is cooked (drives the estimated batch weight)
-function openYieldPicker(ing, onDone) {
-  let cat = 0;
+function openYieldPicker(ing, onDone, startCat = 0) {
+  let cat = startCat;
   const { el, close } = openSheet('<div class="yp"></div>', { full: true });
   const render = () => {
     el.querySelector('.yp').innerHTML = `
@@ -1331,11 +1334,13 @@ function openRecipeBuilder(existing) {
     ingredients: existing.ingredients.map(i => ({ ...i })),
     // only a WEIGHED cooked weight is carried into editing; estimates recompute live
     cookedTotalGrams: existing.cookedWeighed ? existing.cookedTotalGrams : null,
+    batchYield: existing.batchYield ? { ...existing.batchYield } : null,
     customServings: (existing.servings || []).filter(s => !/^(whole batch|1\/2 batch|1\/4 batch|g|oz)$/.test(s.name)).map(s => ({ ...s })),
     favorite: existing.favorite, lastUsed: existing.lastUsed,
     defaultServing: existing.defaultServing, defaultAmount: existing.defaultAmount,
   } : {
     id: uuid(), name: '', ingredients: [], cookedTotalGrams: null, customServings: [],
+    batchYield: null,
     favorite: false, lastUsed: null, defaultServing: null, defaultAmount: 1,
   };
   navTo('recipeEdit');
@@ -1344,7 +1349,7 @@ function openRecipeBuilder(existing) {
 
 function renderRecipeBuilder() {
   const scr = document.getElementById('screen-recipeEdit');
-  const { totals, missing, rawTotal, estCooked, anyYield } = computeRecipe(draft.ingredients);
+  const { totals, missing, rawTotal, estCooked, anyYield } = computeRecipe(draft.ingredients, draft.batchYield);
   // basis priority: weighed cooked > estimated-from-cook-methods > raw total
   const basis = draft.cookedTotalGrams || (anyYield ? estCooked : rawTotal);
   const basisLabel = draft.cookedTotalGrams && draft.cookedTotalGrams !== rawTotal ? 'cooked (weighed)'
@@ -1379,6 +1384,9 @@ function renderRecipeBuilder() {
       <button class="btn small" id="rb-add">＋ Add ingredient</button>
       <button class="btn small" id="rb-scan">📷 Scan</button>
     </div>
+    <button class="cook-pill" id="rb-batch">${draft.batchYield
+      ? `🍳 Whole batch: ${esc(draft.batchYield.label)} −${Math.round((1 - draft.batchYield.factor) * 100)}%`
+      : '🍳 Whole-batch cooking (cheesecake, casserole…): none'}</button>
     <p class="hint">Weigh ingredients <b>raw</b> (g; for liquids use ml ≈ g). If you weighed one cooked, tap ⇄ to convert. A cooked batch weight at save time is optional — for dishes that lose or gain water in cooking.</p>
     ${draft.cookedTotalGrams ? `<label>Cooked batch weight (g)<input class="input" id="rb-cooked" type="number" step="any" value="${draft.cookedTotalGrams}"></label>` : ''}
     <div class="recipe-footer card">
@@ -1427,6 +1435,10 @@ function renderRecipeBuilder() {
   };
   scr.querySelector('#rb-add').onclick = () => pickFood(addIngredient);
   scr.querySelector('#rb-scan').onclick = () => scanFlow(addIngredient);
+  scr.querySelector('#rb-batch').onclick = () => openYieldPicker({ name: draft.name || 'this whole batch' }, y => {
+    draft.batchYield = y;
+    renderRecipeBuilder();
+  }, Math.max(0, YIELD_CATS.findIndex(c => c.name === 'Baked & whole dishes')));
   scr.querySelector('#rb-save').onclick = () => saveRecipeModal();
 }
 
@@ -1453,7 +1465,7 @@ function gramsPrompt(food, cb) {
 
 function saveRecipeModal() {
   if (!draft.name.trim()) { toast('Give the recipe a name'); return; }
-  const { totals, missing, rawTotal, estCooked, anyYield } = computeRecipe(draft.ingredients);
+  const { totals, missing, rawTotal, estCooked, anyYield } = computeRecipe(draft.ingredients, draft.batchYield);
   if (totals.kcal == null) { toast('An ingredient has no calorie data — fix it before saving'); return; }
   const fallbackG = anyYield ? estCooked : rawTotal;
 
@@ -1519,6 +1531,7 @@ function saveRecipeModal() {
       rawTotalGrams: rawTotal,
       cookedTotalGrams: cookedG,
       cookedWeighed: !!typed, // false = estimated/raw fallback, keeps re-estimating on edit
+      batchYield: draft.batchYield || null,
       missingNutrients: missing,
     };
     await DB.put('foods', recipe);
