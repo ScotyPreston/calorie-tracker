@@ -8,7 +8,10 @@ import { YIELD_CATS } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v9';
+const APP_VERSION = 'v10';
+
+// Raspberry Pi backup target — reachable only when the phone is on the tailnet
+const PI_URL = 'https://fbasz.tail23902b.ts.net';
 
 // ---------------------------------------------------------------- state
 
@@ -20,6 +23,7 @@ let settings = {
   usdaKey: '',
   nutritionix: { id: '', key: '' },
   groupsEnabled: true,
+  piBackup: true,
 };
 const GROUPS = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 const MACRO_COLORS = { protein: 'var(--c-protein)', carbs: 'var(--c-carbs)', fat: 'var(--c-fat)' };
@@ -39,6 +43,9 @@ async function boot() {
     btn.onclick = () => navTo(btn.dataset.screen);
   });
   navTo('dashboard');
+
+  // safety-net backup to the Pi shortly after every open (quiet if unreachable)
+  setTimeout(() => piBackupNow(false), 5000);
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').then(reg => {
@@ -65,6 +72,42 @@ async function refreshFoods() {
 }
 
 async function saveSettings() { await DB.setSetting('settings', settings); }
+
+// ---------------------------------------------------------------- Pi backup
+
+let piBackupTimer = null;
+
+// called after anything that changes data; sends one backup a minute later
+function schedulePiBackup() {
+  if (settings.piBackup === false) return;
+  clearTimeout(piBackupTimer);
+  piBackupTimer = setTimeout(() => piBackupNow(false), 60000);
+}
+
+async function piBackupNow(manual) {
+  if (!manual && settings.piBackup === false) return false;
+  try {
+    const data = await DB.exportAll();
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const resp = await fetch(PI_URL + '/api/calorie/backup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(data),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    const r = await resp.json();
+    if (!r.ok) throw new Error(r.error || 'backup rejected');
+    await DB.setSetting('piBackupInfo', { ts: new Date().toISOString(), file: r.file });
+    if (manual) toast('Backed up to the Pi ✓');
+    return true;
+  } catch (e) {
+    // off the tailnet / Pi asleep — quiet for auto-backups, loud when asked directly
+    if (manual) alert('Pi backup failed: ' + e.message + '\n\nIs Tailscale on?');
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------- navigation
 
@@ -452,6 +495,7 @@ function openFoodDetail(food, ctx = {}) {
       const timestamp = new Date(y, mo - 1, d, hh || 0, mm || 0).toISOString();
       if (mode === 'edit-entry') {
         await DB.put('log', { ...entry, grams: g, amount: parseFloat(amount) || g, servingName: serving.name, group: settings.groupsEnabled ? group : null, timestamp });
+        schedulePiBackup();
       } else {
         await addLogEntry(food, { grams: g, amount: parseFloat(amount) || 1, servingName: serving.name, date, group: settings.groupsEnabled ? group : null, timestamp });
       }
@@ -463,6 +507,7 @@ function openFoodDetail(food, ctx = {}) {
     if (delBtn) delBtn.onclick = async () => {
       if (!confirm('Delete this log entry?')) return;
       await DB.del('log', entry.id);
+      schedulePiBackup();
       close(); navTo('dashboard');
     };
   };
@@ -500,6 +545,7 @@ async function addLogEntry(food, { grams, amount, servingName, date, group, time
     timestamp: timestamp || new Date().toISOString(),
     group: group || null,
   });
+  schedulePiBackup();
 }
 
 // ---------------------------------------------------------------- label photo → Claude vision
@@ -721,6 +767,7 @@ function openFoodForm(existing, { barcode = '', onSaved = null, prefill = null }
     delete f._unsaved;
     await DB.put('foods', f);
     await refreshFoods();
+    schedulePiBackup();
     close();
     toast(isEdit ? 'Food updated' : 'Food saved');
     if (onSaved) onSaved(foodsById.get(f.id));
@@ -1298,6 +1345,7 @@ function saveRecipeModal() {
     };
     await DB.put('foods', recipe);
     await refreshFoods();
+    schedulePiBackup();
     close();
     navTo('recipes');
     toast('Recipe saved');
@@ -1546,8 +1594,18 @@ function renderSettings() {
       <button class="btn wide" id="st-update">↻ Check for updates</button>
     </div>
     <div class="card">
-      <h4>Backup</h4>
-      <p class="hint">All data lives on this device only. iOS can evict site storage — export regularly.</p>
+      <h4>Pi backup</h4>
+      <p class="hint">Everything backs up to the Raspberry Pi automatically whenever the phone can reach it over Tailscale (a minute after any change, and on every app open). The Pi keeps the last 30 copies.</p>
+      <label class="row-label"><input type="checkbox" id="st-pib" ${settings.piBackup !== false ? 'checked' : ''}> Auto-backup to the Pi</label>
+      <p class="hint" id="st-pib-status">checking…</p>
+      <div class="row gap">
+        <button class="btn small" id="st-pib-now">⬆ Back up now</button>
+        <button class="btn small" id="st-pib-restore">⬇ Restore from Pi</button>
+      </div>
+    </div>
+    <div class="card">
+      <h4>Backup file</h4>
+      <p class="hint">Manual export/import as a file — works anywhere, no Tailscale needed.</p>
       <button class="btn wide" id="st-export">⬇ Export all data to JSON</button>
       <label class="btn wide file-btn">⬆ Import from JSON<input type="file" id="st-import" accept=".json,application/json" hidden></label>
       <label class="row-label"><input type="checkbox" id="st-replace"> Replace everything on import (unchecked = merge)</label>
@@ -1566,6 +1624,31 @@ function renderSettings() {
       if (el) el.textContent = v ? 'cached ' + v : 'not cached yet';
     }).catch(() => {});
   }
+  DB.getSetting('piBackupInfo').then(info => {
+    const el = scr.querySelector('#st-pib-status');
+    if (el) el.textContent = info ? `Last backup: ${new Date(info.ts).toLocaleString()} (${info.file})` : 'No Pi backup yet';
+  });
+  scr.querySelector('#st-pib-now').onclick = () => piBackupNow(true).then(ok => { if (ok) renderSettings(); });
+  scr.querySelector('#st-pib-restore').onclick = async () => {
+    let r;
+    try {
+      const resp = await fetch(PI_URL + '/api/calorie/backup');
+      r = await resp.json();
+    } catch (e) {
+      alert('Could not reach the Pi — is Tailscale on?');
+      return;
+    }
+    if (!r.ok) { alert('Restore failed: ' + (r.error || '?')); return; }
+    if (!r.backup) { alert('No backup on the Pi yet.'); return; }
+    if (!confirm(`Replace EVERYTHING on this phone with the Pi backup (${r.file})? This cannot be undone.`)) return;
+    await DB.importAll(r.backup, { replace: true });
+    const saved = await DB.getSetting('settings');
+    if (saved) settings = { ...settings, ...saved, targets: { ...settings.targets, ...(saved.targets || {}) } };
+    await refreshFoods();
+    toast('Restored from the Pi');
+    renderSettings();
+  };
+
   scr.querySelector('#st-update').onclick = async () => {
     toast('Checking for updates…');
     try {
@@ -1587,6 +1670,7 @@ function renderSettings() {
       fat: parseFloat(scr.querySelector('#st-fat').value) || 0,
     };
     settings.groupsEnabled = scr.querySelector('#st-groups').checked;
+    settings.piBackup = scr.querySelector('#st-pib').checked;
     settings.usdaKey = scr.querySelector('#st-usda').value.trim();
     settings.nutritionix = {
       id: scr.querySelector('#st-nix-id').value.trim(),
