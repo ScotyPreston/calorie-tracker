@@ -8,6 +8,48 @@
 // they're marked ≈ in the UI. Do not "round" these numbers casually; the whole
 // point of this tool is that the conversion is right.
 
+// Best-guess cook method from an ingredient's name — the recipe builder uses this
+// to estimate the cooked batch weight. Factors come from the same USDA-based table
+// below. Conservative: no match = assumed uncooked (×1). First matching rule wins.
+const GUESSES = [
+  [/chicken.*(breast|tender)|breast/i, 'Chicken breast, baked', 0.72],
+  [/chicken.*thigh|thigh/i, 'Chicken thigh, baked', 0.69],
+  [/rotisserie|whole chicken/i, 'Whole chicken, roasted', 0.78],
+  [/chicken/i, 'Chicken, baked', 0.72],
+  [/ground (beef|chuck)|beef.*ground|hamburger/i, 'Ground beef crumbles, 90/10', 0.71],
+  [/ground turkey|turkey.*ground/i, 'Ground turkey, cooked', 0.74],
+  [/steak|sirloin|ribeye|filet|beef/i, 'Steak, grilled', 0.76],
+  [/bacon/i, 'Bacon, pan-fried', 0.31],
+  [/sausage/i, 'Sausage, pan-fried', 0.80],
+  [/pork.*tenderloin|tenderloin.*pork/i, 'Pork tenderloin, roasted', 0.80],
+  [/pork/i, 'Pork chop / loin, cooked', 0.79],
+  [/salmon/i, 'Salmon, baked', 0.78],
+  [/tilapia|cod|haddock|fish/i, 'White fish, baked', 0.81],
+  [/shrimp/i, 'Shrimp, cooked', 0.75],
+  [/egg/i, 'Eggs, scrambled', 0.90],
+  [/brown rice/i, 'Brown rice, cooked', 3.0],
+  [/rice cake/i, null, null], // rice cakes are a snack, not raw rice
+  [/rice/i, 'White rice, cooked', 2.8],
+  [/quinoa/i, 'Quinoa, cooked', 3.0],
+  [/pasta|spaghetti|penne|macaroni|noodle/i, 'Pasta, boiled', 2.25],
+  [/lentil/i, 'Lentils, boiled', 2.5],
+  [/oat/i, null, null], // oatmeal water varies too much to guess
+  [/green bean/i, 'Vegetables, roasted', 0.8],
+  [/bean/i, 'Beans (from dry), boiled', 2.6],
+  [/sweet potato/i, 'Sweet potato, baked', 0.8],
+  [/potato/i, 'Potato, baked', 0.83],
+  [/mushroom/i, 'Mushrooms, sautéed', 0.55],
+  [/spinach/i, 'Spinach, wilted', 0.35],
+  [/broccoli|pepper|zucchini|squash|carrot|onion|cauliflower|asparagus|vegetable|veggie/i, 'Vegetables, roasted', 0.8],
+];
+
+export function guessYield(name) {
+  for (const [re, label, factor] of GUESSES) {
+    if (re.test(name || '')) return label ? { label, factor } : null;
+  }
+  return null;
+}
+
 export const YIELD_CATS = [
   {
     name: 'Ground beef',

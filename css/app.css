@@ -261,6 +261,13 @@ label { display: block; font-size: 13px; color: var(--dim); font-weight: 600; }
 }
 .ing-main { flex: 1; min-width: 0; }
 .ing-grams { width: 74px; margin: 0; padding: 8px; text-align: right; }
+.cook-pill {
+  background: var(--card-2); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 10px; font-size: 12px; font-weight: 600;
+  margin-top: 5px; cursor: pointer;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .recipe-footer { position: sticky; bottom: calc(env(safe-area-inset-bottom, 0px) + 66px); }
 .rf-line { display: flex; justify-content: space-between; font-size: 14px; color: var(--dim); padding: 3px 0; gap: 10px; }
