@@ -8,7 +8,7 @@ import { YIELD_CATS } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v12';
+const APP_VERSION = 'v13';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -459,6 +459,7 @@ function openFoodDetail(food, ctx = {}) {
         </div>
         <div class="row gap">
           ${food._unsaved ? '' : `<button class="btn small" id="fd-edit">${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'}</button>`}
+          ${food.barcode && !food._unsaved ? '<button class="btn small" id="fd-refresh">↻ Refresh data</button>' : ''}
           ${food.source === 'recipe' ? '<button class="btn small" id="fd-label">Nutrition label</button>' : ''}
         </div>
         <button class="btn primary wide" id="fd-log">${mode === 'edit-entry' ? 'Update Entry' : 'Add to Diary'}</button>
@@ -488,6 +489,15 @@ function openFoodDetail(food, ctx = {}) {
     };
     const labelBtn = overlayBack.querySelector('#fd-label');
     if (labelBtn) labelBtn.onclick = () => openLabel(food);
+    const refreshBtn = overlayBack.querySelector('#fd-refresh');
+    if (refreshBtn) refreshBtn.onclick = async () => {
+      toast('Refreshing product data…');
+      const r = await refreshBarcodeFood(food);
+      if (!r) { toast('No fresh data found for this barcode'); return; }
+      food = r.food;
+      render();
+      toast(r.warn ? 'Refreshed — but this product’s database entry looks shaky, double-check the label' : 'Product data refreshed ✓');
+    };
     overlayBack.querySelector('#fd-log').onclick = async () => {
       const g = (parseFloat(amount) || 0) * serving.grams;
       if (g <= 0) { toast('Enter an amount first'); return; }
@@ -810,6 +820,50 @@ async function scanFlow(onPick = null) {
   }
 }
 
+// fetch + parse one barcode from Open Food Facts; returns an unsaved food or null
+async function fetchOffByCode(code) {
+  let data;
+  try {
+    const resp = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
+    if (!resp.ok) return null;
+    data = await resp.json();
+  } catch (e) {
+    return null;
+  }
+  if (!data || data.status !== 1 || !data.product) return null;
+  const food = offToFood(data.product, code);
+  if (!food) return null;
+  await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined, _checkLabel: undefined }, cachedAt: new Date().toISOString(), v: 2 });
+  return food;
+}
+
+// Re-pull a saved barcode food's nutrition with the CURRENT parser, keeping its
+// identity (id, star, name) so past diary entries recalculate automatically.
+async function refreshBarcodeFood(food) {
+  const codes = codeCandidates(food.barcode, '');
+  let fresh = null;
+  for (const c of codes) { fresh = await fetchOffByCode(c); if (fresh) break; }
+  if (!fresh) {
+    for (const c of codes) {
+      const item = await nixItem('upc=' + encodeURIComponent(c));
+      if (item) { fresh = nixToFood(item); break; }
+    }
+  }
+  if (!fresh) return null;
+  const warn = !!fresh._checkLabel;
+  food.perGram = fresh.perGram;
+  food.servings = fresh.servings;
+  food.source = fresh.source;
+  if (!food.servings.some(s => s.name === food.defaultServing)) {
+    food.defaultServing = fresh.defaultServing;
+    food.defaultAmount = fresh.defaultAmount;
+  }
+  await DB.put('foods', food);
+  await refreshFoods();
+  schedulePiBackup();
+  return { food: foodsById.get(food.id), warn };
+}
+
 // Scanned foods are saved to the database IMMEDIATELY (not just on "Add to Diary"),
 // so they show up in Recents and survive even if you only looked at them.
 async function saveScannedFood(food) {
@@ -838,23 +892,12 @@ async function lookupBarcode(candidates) {
     if (cached && cached.v === 2) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
   }
   for (const code of candidates) {
-    let data;
-    try {
-      const resp = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
-      if (!resp.ok) continue;
-      data = await resp.json();
-    } catch (e) {
-      toast('No connection — Open Food Facts lookup failed');
-      return null;
-    }
-    if (!data || data.status !== 1 || !data.product) continue;
-    const food = offToFood(data.product, code);
+    const food = await fetchOffByCode(code);
     if (!food) continue;
     if (food._checkLabel) {
       delete food._checkLabel;
-      setTimeout(() => toast('⚠ This product’s database entry looked off — double-check the numbers against the label (Edit food to fix)'), 600);
+      setTimeout(() => toast('⚠ This product’s database entry looked off — double-check the numbers against the label'), 600);
     }
-    await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 2 });
     return saveScannedFood(food);
   }
   // last resort: Nutritionix UPC lookup (official brand data), when keys are set
@@ -923,9 +966,49 @@ function offToFood(p, barcode) {
       perGram.kcal = (perGram.protein ?? 0) * 4 + (perGram.carbs ?? 0) * 4 + (perGram.fat ?? 0) * 9;
     } else return null;
   }
+
+  // Constraint repairs. A subtler poisoning (Scot's Drizzilicious record): SOME
+  // nutrients typed per-serving into the _100g fields while others are true
+  // per-100g — internally consistent, so only physical impossibilities give it
+  // away: sugar can't exceed total carbs, saturated fat can't exceed total fat.
+  // The under-scaled side is off by exactly 100/serving-grams — rescale it.
+  const scale = (qty > 0 && Math.abs(qty - 100) > 15) ? 100 / qty : null;
+  const repaired = [];
+  if (scale) {
+    const pg = perGram;
+    if (pg.satFat != null && pg.fat != null && pg.satFat > pg.fat * 1.02) {
+      const f2 = pg.fat * scale;
+      if (pg.satFat <= f2 * 1.02) { pg.fat = f2; repaired.push('fat'); }
+    }
+    if (pg.sugar != null && pg.carbs != null && pg.sugar > pg.carbs * 1.02) {
+      const c2 = pg.carbs * scale;
+      if (pg.sugar <= c2 * 1.02) { pg.carbs = c2; repaired.push('carbs'); }
+    }
+    const estNow = () => (pg.protein ?? 0) * 4 + (pg.carbs ?? 0) * 4 + (pg.fat ?? 0) * 9;
+    if (pg.kcal != null) {
+      const e = estNow();
+      if (e > 0.5 && pg.kcal / e < 0.6 && (pg.kcal * scale) / e <= 1.6) { pg.kcal *= scale; repaired.push('kcal'); }
+    }
+    // several fields proven under-scaled -> the whole macro row was typed per-serving
+    if (repaired.length >= 2 && pg.protein != null && !repaired.includes('protein')) {
+      pg.protein *= scale;
+      repaired.push('protein');
+    }
+    // sodium can't be constraint-checked, but OFF carries salt too (salt = sodium x 2.5);
+    // when they contradict each other on a proven-poisoned record, honest null beats wrong
+    if (repaired.length >= 2 && pg.sodium != null) {
+      const saltG = num(nu.salt_100g);
+      const sodiumFromSalt = saltG == null ? null : (saltG / 2.5) / 100 * 1000; // mg per gram
+      if (sodiumFromSalt != null && Math.max(pg.sodium, sodiumFromSalt) > 0 &&
+        Math.abs(pg.sodium - sodiumFromSalt) / Math.max(pg.sodium, sodiumFromSalt) > 0.5) {
+        pg.sodium = null;
+      }
+    }
+  }
+
   // Atwater sanity: stated calories should roughly match 4/4/9 from the macros
   const est = (perGram.protein ?? 0) * 4 + (perGram.carbs ?? 0) * 4 + (perGram.fat ?? 0) * 9;
-  const suspicious = poisoned ||
+  const suspicious = poisoned || repaired.length > 0 ||
     (est > 0.5 && perGram.kcal != null && (perGram.kcal / est > 1.5 || perGram.kcal / est < 0.6));
   const servings = [];
   if (qty > 0) {
