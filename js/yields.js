@@ -50,25 +50,58 @@ export function guessYield(name) {
   return null;
 }
 
+// Best-guess converter CATEGORY from a food's name. Only the category — the
+// exact cut / lean % is always picked per log, because 80/20 and 93/7 (or
+// breast vs thigh) lose different amounts of weight.
+const CAT_GUESSES = [
+  [/ground|hamburger|meatloaf/i, 'Ground meat'],
+  [/bacon|sausage|brat/i, 'Bacon & sausage'],
+  [/chicken|drumstick|wing/i, 'Chicken'],
+  [/steak|sirloin|ribeye|filet|brisket|beef|roast/i, 'Steak & roast'],
+  [/potato/i, 'Potatoes'],
+  [/pork|ham\b|loin|rib/i, 'Pork'],
+  [/salmon|tilapia|cod|haddock|tuna|shrimp|fish/i, 'Fish & seafood'],
+  [/rice|pasta|quinoa|lentil|bean|noodle|spaghetti|penne|macaroni/i, 'Rice & pasta'],
+  [/mushroom|spinach|onion|broccoli|carrot|zucchini|squash|cauliflower|asparagus|pepper|vegetable|veggie/i, 'Vegetables'],
+];
+
+export function guessYieldCat(name) {
+  for (const [re, catName] of CAT_GUESSES) {
+    if (re.test(name || '')) {
+      const i = YIELD_CATS.findIndex(c => c.name === catName);
+      if (i >= 0) return i;
+    }
+  }
+  return null;
+}
+
 export const YIELD_CATS = [
   {
-    name: 'Ground beef',
+    name: 'Ground meat',
     items: [
-      { name: 'Crumbles, drained, 80/20', y: 0.67 },
-      { name: 'Crumbles, drained, 85/15', y: 0.69 },
-      { name: 'Crumbles, drained, 90/10', y: 0.71 },
-      { name: 'Crumbles, drained, 93/7', y: 0.72 },
-      { name: 'Patties, pan-cooked, 80/20', y: 0.73 },
-      { name: 'Patties, pan-cooked, 85/15', y: 0.75 },
-      { name: 'Patties, pan-cooked, 90/10', y: 0.76 },
-      { name: 'Patties, pan-cooked, 93/7', y: 0.77 },
-      { name: 'Patties, grilled, 80/20', y: 0.69 },
-      { name: 'Patties, grilled, 85/15', y: 0.70 },
-      { name: 'Patties, grilled, 90/10', y: 0.72 },
-      { name: 'Patties, grilled, 93/7', y: 0.73 },
+      { name: 'Beef crumbles, drained, 80/20', y: 0.67 },
+      { name: 'Beef crumbles, drained, 85/15', y: 0.69 },
+      { name: 'Beef crumbles, drained, 90/10', y: 0.71 },
+      { name: 'Beef crumbles, drained, 93/7', y: 0.72 },
+      { name: 'Beef patties, pan-cooked, 80/20', y: 0.73 },
+      { name: 'Beef patties, pan-cooked, 85/15', y: 0.75 },
+      { name: 'Beef patties, pan-cooked, 90/10', y: 0.76 },
+      { name: 'Beef patties, pan-cooked, 93/7', y: 0.77 },
+      { name: 'Beef patties, grilled, 80/20', y: 0.69 },
+      { name: 'Beef patties, grilled, 85/15', y: 0.70 },
+      { name: 'Beef patties, grilled, 90/10', y: 0.72 },
+      { name: 'Beef patties, grilled, 93/7', y: 0.73 },
       { name: 'Meatloaf, baked, 80/20–85/15', y: 0.70 },
       { name: 'Meatloaf, baked, 90/10+', y: 0.72 },
+      { name: 'Turkey crumbles, 85/15', y: 0.72, approx: true },
+      { name: 'Turkey crumbles, 93/7', y: 0.74, approx: true },
+      { name: 'Turkey crumbles, 99/1 breast', y: 0.76, approx: true },
+      { name: 'Turkey patties, 85/15', y: 0.74, approx: true },
+      { name: 'Turkey patties, 93/7', y: 0.76, approx: true },
+      { name: 'Chicken crumbles, regular (~92/8)', y: 0.73, approx: true },
+      { name: 'Chicken crumbles, 99/1 breast', y: 0.75, approx: true },
     ],
+    note: 'Lean % matters — fattier grinds lose more weight. Beef values are USDA-measured; turkey and chicken grinds are typical values scaled the same way.',
   },
   {
     name: 'Chicken',

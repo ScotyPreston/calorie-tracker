@@ -4,7 +4,7 @@ import {
   scale, sumLoose, sumStrict, macroKcal,
   f0, f1, fg, escapeHtml as esc,
 } from './models.js';
-import { YIELD_CATS, guessYield } from './yields.js';
+import { YIELD_CATS, guessYield, guessYieldCat } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
@@ -455,6 +455,7 @@ function openFoodDetail(food, ctx = {}) {
             ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${esc(s.name)} (${fg(s.grams)}g)</option>`).join('')}
           </select></label>
         </div>
+        <button class="btn small" id="fd-cooked">⇄ I weighed it cooked</button>
         <div class="fd-controls">
           ${settings.groupsEnabled ? `<label>Meal<select class="input" id="fd-group">
             ${GROUPS.map(g => `<option ${g === group ? 'selected' : ''}>${g}</option>`).join('')}
@@ -489,6 +490,12 @@ function openFoodDetail(food, ctx = {}) {
     overlayBack.querySelector('#fd-close').onclick = close;
     overlayBack.querySelector('#fd-amount').oninput = e => { amount = e.target.value; softUpdate(); };
     overlayBack.querySelector('#fd-serving').onchange = e => { servingName = e.target.value; render(); };
+    overlayBack.querySelector('#fd-cooked').onclick = () => converterModal(raw => {
+      amount = Math.round(raw * 10) / 10;
+      servingName = 'g';
+      render();
+      toast(`${fg(amount)}g raw dropped into Amount`);
+    }, { foodName: food.name });
     const gsel = overlayBack.querySelector('#fd-group');
     if (gsel) gsel.onchange = e => { group = e.target.value; };
     overlayBack.querySelector('#fd-time').onchange = e => { timeVal = e.target.value; };
@@ -1758,8 +1765,17 @@ function renderConverter() {
   buildConverter(document.getElementById('screen-convert'));
 }
 
-// modal version used from the recipe builder; cb receives the RAW grams
-function converterModal(cb) {
+// modal version used from the recipe builder and food logging; cb receives the
+// RAW grams. foodName pre-selects the likely CATEGORY only — the exact cut /
+// lean % must be picked fresh each time, since 80/20 vs 93/7 (or breast vs
+// thigh) lose different amounts of weight.
+function converterModal(cb, { foodName = null } = {}) {
+  if (foodName != null) {
+    const cat = guessYieldCat(foodName);
+    if (cat != null && cat !== cvState.cat) cvState.cat = cat;
+    cvState.item = null;
+    cvState.weight = '';
+  }
   const { el, close } = openSheet('<div class="cv2-sheet"></div>', { full: true });
   buildConverter(el.querySelector('.cv2-sheet'), { onRaw: raw => { close(); cb(raw); } });
 }
