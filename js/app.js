@@ -8,7 +8,7 @@ import { YIELD_CATS } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -834,7 +834,8 @@ async function lookupBarcode(candidates) {
   }
   for (const code of candidates) {
     const cached = await DB.get('scanCache', code);
-    if (cached) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
+    // v2 = cached by the basis-checking parser; older cached lookups get refetched
+    if (cached && cached.v === 2) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
   }
   for (const code of candidates) {
     let data;
@@ -849,7 +850,11 @@ async function lookupBarcode(candidates) {
     if (!data || data.status !== 1 || !data.product) continue;
     const food = offToFood(data.product, code);
     if (!food) continue;
-    await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString() });
+    if (food._checkLabel) {
+      delete food._checkLabel;
+      setTimeout(() => toast('⚠ This product’s database entry looked off — double-check the numbers against the label (Edit food to fix)'), 600);
+    }
+    await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 2 });
     return saveScannedFood(food);
   }
   // last resort: Nutritionix UPC lookup (official brand data), when keys are set
@@ -859,7 +864,7 @@ async function lookupBarcode(candidates) {
       const food = nixToFood(item);
       if (food) {
         food.barcode = code;
-        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString() });
+        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 2 });
         return saveScannedFood(food);
       }
     }
@@ -869,41 +874,72 @@ async function lookupBarcode(candidates) {
 
 function offToFood(p, barcode) {
   const nu = p.nutriments || {};
-  const g100 = (key) => {
-    const v = nu[key];
-    return (typeof v === 'number' && isFinite(v)) ? v / 100 : null;
+  const qty = parseFloat(p.serving_quantity);
+  const num = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
+  // per-gram candidates from BOTH bases OFF publishes
+  const h = (key) => { const v = num(nu[key + '_100g']); return v == null ? null : v / 100; };
+  const s = (key) => {
+    if (!(qty > 0)) return null;
+    const v = num(nu[key + '_serving']);
+    return v == null ? null : v / qty;
   };
-  let kcal = g100('energy-kcal_100g');
-  if (kcal == null && typeof nu.energy_100g === 'number') kcal = (nu.energy_100g / 4.184) / 100; // kJ fallback
+
+  // OFF crowd data sometimes lands the LABEL's per-serving numbers in the _100g
+  // fields (Scot's 19-kcal Big Mac... err, Birthday Cake Bites bug, 9-01).
+  // Detect: serving is far from 100g, yet _100g ≈ _serving for calories.
+  const k100 = num(nu['energy-kcal_100g']), kServ = num(nu['energy-kcal_serving']);
+  let poisoned = false;
+  if (qty > 0 && Math.abs(qty - 100) > 15 && k100 != null && kServ != null && kServ > 0) {
+    poisoned = Math.abs(k100 - kServ) / kServ < 0.15;
+  }
+
+  const pick = (key) => {
+    const hv = h(key), sv = s(key);
+    if (poisoned) {
+      // _100g fields hold per-serving values: use per-serving, or reinterpret _100g as per-serving
+      if (sv != null) return sv;
+      return (hv != null && qty > 0) ? (hv * 100) / qty : hv;
+    }
+    if (hv == null) return sv;
+    if (sv == null) return hv;
+    // both present but badly disagreeing: trust per-serving — it's what got typed off the label
+    return (Math.abs(hv - sv) / Math.max(hv, sv) > 0.25) ? sv : hv;
+  };
+
   const perGram = {
-    kcal,
-    protein: g100('proteins_100g'),
-    carbs: g100('carbohydrates_100g'),
-    fat: g100('fat_100g'),
-    fiber: g100('fiber_100g'),
-    sugar: g100('sugars_100g'),
-    sodium: g100('sodium_100g') == null ? null : g100('sodium_100g') * 1000, // g→mg per gram
-    satFat: g100('saturated-fat_100g'),
+    kcal: pick('energy-kcal'),
+    protein: pick('proteins'),
+    carbs: pick('carbohydrates'),
+    fat: pick('fat'),
+    fiber: pick('fiber'),
+    sugar: pick('sugars'),
+    sodium: (() => { const v = pick('sodium'); return v == null ? null : v * 1000; })(), // g→mg per gram
+    satFat: pick('saturated-fat'),
   };
+  if (perGram.kcal == null && typeof nu.energy_100g === 'number') perGram.kcal = (nu.energy_100g / 4.184) / 100; // kJ fallback
   if (perGram.kcal == null) {
     // compute from macros if we can; otherwise this record is unusable
     if (perGram.protein != null || perGram.carbs != null || perGram.fat != null) {
       perGram.kcal = (perGram.protein ?? 0) * 4 + (perGram.carbs ?? 0) * 4 + (perGram.fat ?? 0) * 9;
     } else return null;
   }
+  // Atwater sanity: stated calories should roughly match 4/4/9 from the macros
+  const est = (perGram.protein ?? 0) * 4 + (perGram.carbs ?? 0) * 4 + (perGram.fat ?? 0) * 9;
+  const suspicious = poisoned ||
+    (est > 0.5 && perGram.kcal != null && (perGram.kcal / est > 1.5 || perGram.kcal / est < 0.6));
   const servings = [];
-  const sq = parseFloat(p.serving_quantity);
-  if (sq > 0) {
+  if (qty > 0) {
     const label = (p.serving_size || '').trim();
-    servings.push({ name: label && !/^\d/.test(label) ? label : 'serving' + (label ? ` (${label})` : ''), grams: sq });
+    servings.push({ name: label && !/^\d/.test(label) ? label : 'serving' + (label ? ` (${label})` : ''), grams: qty });
   }
   servings.push({ name: 'oz', grams: 28.35 });
   servings.push({ name: 'g', grams: 1 });
   const name = [p.product_name, p.brands ? `(${p.brands.split(',')[0].trim()})` : ''].filter(Boolean).join(' ').trim() || `Product ${barcode}`;
   return {
     id: uuid(), name, barcode, source: 'openfoodfacts', perGram, servings,
-    defaultServing: servings[0].name, defaultAmount: sq > 0 ? 1 : 100,
+    defaultServing: servings[0].name, defaultAmount: qty > 0 ? 1 : 100,
     favorite: false, lastUsed: null,
+    _checkLabel: suspicious || undefined,
   };
 }
 
@@ -1721,6 +1757,8 @@ function renderSettings() {
 }
 
 // ---------------------------------------------------------------- go
+
+window.__offToFood = offToFood; // debugging handle for verifying parser fixes
 
 boot().catch(err => {
   document.body.insertAdjacentHTML('beforeend',
