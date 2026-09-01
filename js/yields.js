@@ -43,9 +43,27 @@ const GUESSES = [
   [/broccoli|pepper|zucchini|squash|carrot|onion|cauliflower|asparagus|vegetable|veggie/i, 'Vegetables, roasted', 0.8],
 ];
 
+// Lean-ratio-aware ground meat guessing: "80/20 Ground Beef" in a recipe must
+// use the 80/20 crumbles factor, not the generic 90/10 default. Keyed by the
+// lean number; nearest key wins. Crumbles factors — the typical recipe use.
+const GROUND_LEAN = {
+  beef: { 80: ['Ground beef crumbles, 80/20', 0.67], 85: ['Ground beef crumbles, 85/15', 0.69], 90: ['Ground beef crumbles, 90/10', 0.71], 93: ['Ground beef crumbles, 93/7', 0.72] },
+  turkey: { 85: ['Ground turkey crumbles, 85/15', 0.72], 93: ['Ground turkey crumbles, 93/7', 0.74], 99: ['Ground turkey crumbles, 99/1', 0.76] },
+  chicken: { 92: ['Ground chicken crumbles', 0.73], 99: ['Ground chicken crumbles, 99/1', 0.75] },
+};
+
 export function guessYield(name) {
+  const n = name || '';
+  const lean = /(\d{2})\s*\/\s*(\d{1,2})/.exec(n);
+  if (lean && /ground|hamburger|beef|turkey|chicken/i.test(n)) {
+    const table = /turkey/i.test(n) ? GROUND_LEAN.turkey : /chicken/i.test(n) ? GROUND_LEAN.chicken : GROUND_LEAN.beef;
+    const want = +lean[1];
+    const key = Object.keys(table).reduce((a, b) => Math.abs(b - want) < Math.abs(a - want) ? b : a);
+    const [label, factor] = table[key];
+    return { label, factor };
+  }
   for (const [re, label, factor] of GUESSES) {
-    if (re.test(name || '')) return label ? { label, factor } : null;
+    if (re.test(n)) return label ? { label, factor } : null;
   }
   return null;
 }
