@@ -15,6 +15,7 @@ let currentDate = todayStr();
 let settings = {
   targets: { kcal: 2400, protein: 180, carbs: 240, fat: 80 },
   usdaKey: '',
+  nutritionix: { id: '', key: '' },
   groupsEnabled: true,
 };
 const GROUPS = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
@@ -240,7 +241,7 @@ function renderFoodsScreen() {
     <h2>Foods</h2>
     <div class="row gap">
       <button class="btn small" id="foods-scan">📷 Scan</button>
-      <button class="btn small" id="foods-usda">🔎 USDA</button>
+      <button class="btn small" id="foods-usda">🔎 Search</button>
       <button class="btn small" id="foods-new">✏️ New food</button>
     </div>
     <input class="input" id="foods-search" placeholder="Search saved foods…" value="${esc(foodsFilter.q)}">
@@ -284,7 +285,7 @@ function pickFood(onPick) {
     <div class="sheet-head"><h3>Choose a food</h3><button class="icon-btn" data-close>✕</button></div>
     <div class="row gap">
       <button class="btn small" id="pf-scan">📷 Scan</button>
-      <button class="btn small" id="pf-usda">🔎 USDA</button>
+      <button class="btn small" id="pf-usda">🔎 Search</button>
       <button class="btn small" id="pf-new">✏️ New</button>
     </div>
     <input class="input" id="pf-search" placeholder="Search saved foods…">
@@ -663,6 +664,18 @@ async function lookupBarcode(candidates) {
     await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString() });
     return saveScannedFood(food);
   }
+  // last resort: Nutritionix UPC lookup (official brand data), when keys are set
+  for (const code of candidates) {
+    const item = await nixItem('upc=' + encodeURIComponent(code));
+    if (item) {
+      const food = nixToFood(item);
+      if (food) {
+        food.barcode = code;
+        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString() });
+        return saveScannedFood(food);
+      }
+    }
+  }
   return null;
 }
 
@@ -708,12 +721,76 @@ function offToFood(p, barcode) {
 
 // ---------------------------------------------------------------- USDA search
 
+// ---- Nutritionix: official restaurant/brand menu numbers (needs free keys in Settings) ----
+
+function nixCreds() {
+  const n = settings.nutritionix || {};
+  return (n.id && n.key) ? { 'x-app-id': n.id, 'x-app-key': n.key } : null;
+}
+
+async function nixInstant(q) {
+  const h = nixCreds();
+  if (!h) return [];
+  try {
+    const resp = await fetch(`https://trackapi.nutritionix.com/v2/search/instant?query=${encodeURIComponent(q)}&common=false&branded=true`, { headers: h });
+    if (!resp.ok) return [];
+    const d = await resp.json();
+    return (d.branded || []).slice(0, 15);
+  } catch (e) { return []; }
+}
+
+async function nixItem(params) {
+  const h = nixCreds();
+  if (!h) return null;
+  try {
+    const resp = await fetch(`https://trackapi.nutritionix.com/v2/search/item?${params}`, { headers: h });
+    if (!resp.ok) return null;
+    const d = await resp.json();
+    return (d.foods && d.foods[0]) || null;
+  } catch (e) { return null; }
+}
+
+function nixToFood(f) {
+  const per = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
+  const wg = parseFloat(f.serving_weight_grams);
+  const qty = f.serving_qty || 1;
+  const unit = String(f.serving_unit || 'serving').trim();
+  const servingName = (qty === 1 ? unit : `${fg(qty)} ${unit}`).slice(0, 40);
+  const vals = {
+    kcal: per(f.nf_calories), protein: per(f.nf_protein), carbs: per(f.nf_total_carbohydrate),
+    fat: per(f.nf_total_fat), fiber: per(f.nf_dietary_fiber), sugar: per(f.nf_sugars),
+    sodium: per(f.nf_sodium), satFat: per(f.nf_saturated_fat),
+  };
+  if (vals.kcal == null) return null;
+  let perGram, servings;
+  if (wg > 0) {
+    perGram = {};
+    for (const k of NUTRIENTS) perGram[k] = vals[k] == null ? null : vals[k] / wg;
+    servings = [{ name: servingName, grams: wg }, { name: 'oz', grams: 28.35 }, { name: 'g', grams: 1 }];
+  } else {
+    // no gram weight published — 1 "gram" stands for 1 serving; g/oz would lie, so they're omitted
+    perGram = { ...vals };
+    servings = [{ name: servingName, grams: 1 }];
+  }
+  const name = [f.food_name, f.brand_name ? `(${f.brand_name})` : ''].filter(Boolean).join(' ').trim();
+  return {
+    id: uuid(), name, barcode: f.upc || null, source: 'nutritionix',
+    perGram, servings, defaultServing: servings[0].name, defaultAmount: 1,
+    favorite: false, lastUsed: null, _unsaved: true,
+  };
+}
+
+// ---- combined search sheet: Nutritionix (official menus) first, then USDA ----
+
 function usdaSearchSheet(onPick) {
+  const hasNix = !!nixCreds();
   const { el, close } = openSheet(`
-    <div class="sheet-head"><h3>USDA search</h3><button class="icon-btn" data-close>✕</button></div>
-    <p class="hint">Good for generic foods (chicken breast, rice) that aren't in Open Food Facts.${settings.usdaKey ? '' : ' Using the shared DEMO_KEY — add your own free key in Settings if you hit rate limits.'}</p>
+    <div class="sheet-head"><h3>Search foods</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="hint">${hasNix
+      ? 'Restaurant & brand results use official menu numbers; generic foods (chicken breast, rice) come from USDA.'
+      : 'USDA search. For official restaurant menu numbers (a Big Mac = 580), add the free Nutritionix keys in Settings.'}</p>
     <div class="row gap">
-      <input class="input grow" id="us-q" placeholder="e.g. chicken breast raw">
+      <input class="input grow" id="us-q" placeholder="e.g. big mac, chicken breast raw">
       <button class="btn" id="us-go">Search</button>
     </div>
     <div class="list" id="us-list"></div>`, { full: true });
@@ -723,32 +800,60 @@ function usdaSearchSheet(onPick) {
     if (!q) return;
     el.querySelector('#us-list').innerHTML = '<div class="empty-line">Searching…</div>';
     const key = settings.usdaKey || 'DEMO_KEY';
-    let data;
-    try {
+
+    const usdaP = (async () => {
       const resp = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=30&dataType=Foundation,SR%20Legacy,Survey%20%28FNDDS%29,Branded`);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      data = await resp.json();
-    } catch (e) {
-      const throttled = /429|400/.test(e.message) && !settings.usdaKey;
-      el.querySelector('#us-list').innerHTML = `<div class="empty-line">${throttled
-        ? 'The shared DEMO_KEY is rate-limited right now. Get your own free key at fdc.nal.usda.gov/api-key-signup and paste it in Settings — takes one minute.'
-        : `Search failed (${esc(e.message)}). Check connection or API key in Settings.`}</div>`;
-      return;
+      return resp.json();
+    })();
+    const [nix, usdaRes] = await Promise.all([nixInstant(q), usdaP.then(d => ({ d }), e => ({ e }))]);
+
+    let html = '';
+    if (nix.length) {
+      html += '<div class="group-head"><span>🍔 Restaurants & brands (official)</span></div>';
+      html += nix.map((b, i) => `
+        <div class="food-row" data-nix="${i}">
+          <div class="food-main"><div class="food-name">${esc(b.food_name)}</div>
+          <div class="food-sub">${esc(b.brand_name || '')} · ${Math.round(b.nf_calories)} kcal per ${esc(fg(b.serving_qty || 1))} ${esc(b.serving_unit || 'serving')}</div></div>
+        </div>`).join('');
     }
-    const results = (data.foods || []).filter(x => x.foodNutrients?.length);
-    const srcLabel = (r) => r.dataType === 'Branded' ? (r.brandOwner || 'Branded') : 'USDA';
-    el.querySelector('#us-list').innerHTML = results.map((r, i) => {
-      const k = usdaKcal100(r);
-      return `
-      <div class="food-row" data-i="${i}">
-        <div class="food-main"><div class="food-name">${esc(r.description)}</div>
-        <div class="food-sub">${esc(srcLabel(r))}${k != null ? ` · ${Math.round(k * 100)} kcal/100g` : ''}</div></div>
-      </div>`;
-    }).join('') || '<div class="empty-line">No results.</div>';
-    el.querySelectorAll('.food-row').forEach(row => row.onclick = async () => {
-      const r = results[+row.dataset.i];
-      const sub = row.querySelector('.food-sub');
-      sub.textContent = 'Loading serving sizes…';
+    let usdaFoods = [];
+    if (usdaRes.d) {
+      usdaFoods = (usdaRes.d.foods || []).filter(x => x.foodNutrients?.length);
+      const srcLabel = (r) => r.dataType === 'Branded' ? (r.brandOwner || 'Branded') : 'USDA';
+      if (usdaFoods.length) {
+        if (nix.length) html += '<div class="group-head" style="padding-top:12px"><span>🥦 USDA database</span></div>';
+        html += usdaFoods.map((r, i) => {
+          const k = usdaKcal100(r);
+          return `
+          <div class="food-row" data-usda="${i}">
+            <div class="food-main"><div class="food-name">${esc(r.description)}</div>
+            <div class="food-sub">${esc(srcLabel(r))}${k != null ? ` · ${Math.round(k * 100)} kcal/100g` : ''}</div></div>
+          </div>`;
+        }).join('');
+      }
+    } else {
+      const throttled = /429|400/.test(usdaRes.e?.message || '') && !settings.usdaKey;
+      html += `<div class="empty-line">${throttled
+        ? 'USDA: the shared DEMO_KEY is rate-limited right now. Get a free key at fdc.nal.usda.gov/api-key-signup and paste it in Settings.'
+        : `USDA search failed (${esc(usdaRes.e?.message || '?')}).`}</div>`;
+    }
+    if (!nix.length && !usdaFoods.length && usdaRes.d) html += '<div class="empty-line">No results.</div>';
+    el.querySelector('#us-list').innerHTML = html;
+
+    el.querySelectorAll('[data-nix]').forEach(row => row.onclick = async () => {
+      const b = nix[+row.dataset.nix];
+      row.querySelector('.food-sub').textContent = 'Loading nutrition…';
+      row.style.pointerEvents = 'none';
+      const item = await nixItem('nix_item_id=' + encodeURIComponent(b.nix_item_id));
+      const food = item && nixToFood(item);
+      if (!food) { toast('Could not load that item'); row.style.pointerEvents = ''; return; }
+      close();
+      onPick(food);
+    });
+    el.querySelectorAll('[data-usda]').forEach(row => row.onclick = async () => {
+      const r = usdaFoods[+row.dataset.usda];
+      row.querySelector('.food-sub').textContent = 'Loading serving sizes…';
       row.style.pointerEvents = 'none';
       const food = await usdaToFood(r, key);
       if (!food) { toast('That record has no usable nutrition data'); row.style.pointerEvents = ''; return; }
@@ -1283,6 +1388,12 @@ function renderSettings() {
       <p class="hint">Used for generic foods (chicken breast, rice). Free key at fdc.nal.usda.gov/api-key-signup — without one, the shared DEMO_KEY works but rate-limits.</p>
       <label>API key<input class="input" id="st-usda" value="${esc(settings.usdaKey)}" placeholder="DEMO_KEY (default)"></label>
     </div>
+    <div class="card">
+      <h4>Restaurant menus (Nutritionix)</h4>
+      <p class="hint">Official menu numbers for 800+ chains — a Big Mac shows 580, straight from McDonald's published data. Sign up free at developer.nutritionix.com, then paste both values. Also used as a barcode-lookup backup.</p>
+      <label>Application ID<input class="input" id="st-nix-id" value="${esc(settings.nutritionix?.id || '')}"></label>
+      <label>Application Key<input class="input" id="st-nix-key" value="${esc(settings.nutritionix?.key || '')}"></label>
+    </div>
     <button class="btn primary wide" id="st-save">Save settings</button>
     <div class="card">
       <h4>Backup</h4>
@@ -1307,6 +1418,10 @@ function renderSettings() {
     };
     settings.groupsEnabled = scr.querySelector('#st-groups').checked;
     settings.usdaKey = scr.querySelector('#st-usda').value.trim();
+    settings.nutritionix = {
+      id: scr.querySelector('#st-nix-id').value.trim(),
+      key: scr.querySelector('#st-nix-key').value.trim(),
+    };
     await saveSettings();
     toast('Settings saved');
   };
