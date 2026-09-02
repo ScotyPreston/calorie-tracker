@@ -8,7 +8,7 @@ import { YIELD_CATS, guessYield, guessYieldCat } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v20';
+const APP_VERSION = 'v21';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -407,7 +407,13 @@ function openFoodDetail(food, ctx = {}) {
   ensureMlServing(food);
   // cooked-weight logging: 'raw' logs the typed weight as-is; 'cooked' divides
   // by the picked cook method's yield so the RAW-equivalent grams get logged.
-  let weighMode = 'raw';
+  // Recipes are the reverse: perGram is already per COOKED gram, so 'cooked' is
+  // the default and 'raw' (portioned before cooking) converts via the batch's
+  // own raw→cooked ratio instead of a picked cook method.
+  const isRecipe = food.source === 'recipe';
+  const recipeRatio = (isRecipe && food.rawTotalGrams > 0 && food.cookedTotalGrams > 0)
+    ? food.cookedTotalGrams / food.rawTotalGrams : 1;
+  let weighMode = isRecipe ? 'cooked' : 'raw';
   let cookMethod = null;
   let amount = entry ? (entry.amount || entry.grams) : (food.defaultAmount || 1);
   let servingName = entry
@@ -422,7 +428,10 @@ function openFoodDetail(food, ctx = {}) {
     const serving = (food.servings || []).find(s => s.name === servingName) || { name: 'g', grams: 1 };
     const typedGrams = (parseFloat(amount) || 0) * serving.grams;
     const isCooked = weighMode === 'cooked' && !!cookMethod;
-    const grams = isCooked ? typedGrams / cookMethod.factor : typedGrams;
+    const recipeRaw = isRecipe && weighMode === 'raw';
+    const grams = isCooked ? typedGrams / cookMethod.factor
+      : recipeRaw ? typedGrams * recipeRatio
+      : typedGrams;
     const n = scale(food.perGram, grams);
     const mk = macroKcal(n);
     const mkTotal = (mk.protein ?? 0) + (mk.carbs ?? 0) + (mk.fat ?? 0);
@@ -461,14 +470,17 @@ function openFoodDetail(food, ctx = {}) {
             ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${esc(s.name)} (${fg(s.grams)}g)</option>`).join('')}
           </select></label>
         </div>
-        ${food.source === 'recipe' ? '' : `<div class="fd-weigh">
+        <div class="fd-weigh">
           <span class="fd-weigh-label">Weighed</span>
           <button class="chip ${weighMode === 'raw' ? 'on' : ''}" id="fd-w-raw">🥄 Raw</button>
           <button class="chip ${weighMode === 'cooked' ? 'on' : ''}" id="fd-w-cooked">🔥 Cooked</button>
           ${isCooked ? `<button class="cook-pill" id="fd-method">${esc(cookMethod.label)} ${cookMethod.factor > 1
             ? `+${Math.round((cookMethod.factor - 1) * 100)}%`
             : `−${Math.round((1 - cookMethod.factor) * 100)}%`}</button>` : ''}
-        </div>`}
+          ${recipeRaw && recipeRatio !== 1 ? `<span class="cook-pill">batch ${recipeRatio > 1
+            ? `+${Math.round((recipeRatio - 1) * 100)}%`
+            : `−${Math.round((1 - recipeRatio) * 100)}%`}</span>` : ''}
+        </div>
         <div class="fd-controls">
           ${settings.groupsEnabled ? `<label>Meal<select class="input" id="fd-group">
             ${GROUPS.map(g => `<option ${g === group ? 'selected' : ''}>${g}</option>`).join('')}
@@ -477,6 +489,8 @@ function openFoodDetail(food, ctx = {}) {
         </div>
         <div class="fd-info-line">${isCooked
           ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} cooked — ${fg(grams)}g raw`
+          : recipeRaw
+          ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} raw — ${fg(grams)}g cooked`
           : `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} — ${fg(grams)}g`}</div>
         <div class="energy-summary">
           <svg viewBox="0 0 120 120" class="donut">${segs}
@@ -509,13 +523,12 @@ function openFoodDetail(food, ctx = {}) {
       if (!y) { weighMode = 'raw'; } else { cookMethod = y; weighMode = 'cooked'; }
       render();
     }, guessYieldCat(food.name) ?? 0);
-    // recipes have no Raw/Cooked toggle: their per-gram nutrition is already per
-    // cooked gram, so converting again would double-count the cooking loss
     const rawBtn = overlayBack.querySelector('#fd-w-raw');
     if (rawBtn) rawBtn.onclick = () => { weighMode = 'raw'; render(); };
     const cookedBtn = overlayBack.querySelector('#fd-w-cooked');
     if (cookedBtn) cookedBtn.onclick = () => {
-      if (cookMethod) { weighMode = 'cooked'; render(); } else pickMethod();
+      // recipe perGram is already cooked-basis — no cook method to pick
+      if (isRecipe || cookMethod) { weighMode = 'cooked'; render(); } else pickMethod();
     };
     const methodBtn = overlayBack.querySelector('#fd-method');
     if (methodBtn) methodBtn.onclick = pickMethod;
@@ -555,8 +568,14 @@ function openFoodDetail(food, ctx = {}) {
       // cooked mode: the entry stores the RAW-equivalent so re-editing it later
       // (which assumes raw weights) stays correct
       let logAmount = parseFloat(amount) || 1, logServing = serving.name;
-      if (weighMode === 'cooked' && cookMethod) {
+      if (!isRecipe && weighMode === 'cooked' && cookMethod) {
         g = g / cookMethod.factor;
+        logAmount = Math.round(g * 10) / 10;
+        logServing = 'g';
+      }
+      // recipe weighed raw: store the COOKED-equivalent (recipe perGram basis)
+      if (isRecipe && weighMode === 'raw') {
+        g = g * recipeRatio;
         logAmount = Math.round(g * 10) / 10;
         logServing = 'g';
       }
@@ -1391,7 +1410,7 @@ function renderRecipesScreen() {
 
 function openRecipeBuilder(existing) {
   draft = existing ? {
-    id: existing.id, name: existing.name,
+    id: existing.id, name: existing.name, isEdit: true,
     ingredients: existing.ingredients.map(i => ({ ...i })),
     // only a WEIGHED cooked weight is carried into editing; estimates recompute live
     cookedTotalGrams: existing.cookedWeighed ? existing.cookedTotalGrams : null,
@@ -1400,7 +1419,7 @@ function openRecipeBuilder(existing) {
     favorite: existing.favorite, lastUsed: existing.lastUsed,
     defaultServing: existing.defaultServing, defaultAmount: existing.defaultAmount,
   } : {
-    id: uuid(), name: '', ingredients: [], cookedTotalGrams: null, customServings: [],
+    id: uuid(), name: '', isEdit: false, ingredients: [], cookedTotalGrams: null, customServings: [],
     batchYield: null,
     favorite: false, lastUsed: null, defaultServing: null, defaultAmount: 1,
   };
@@ -1421,7 +1440,7 @@ function renderRecipeBuilder() {
   scr.innerHTML = `
     <div class="sheet-head">
       <button class="icon-btn" id="rb-back">‹</button>
-      <h3 class="grow">${draft.cookedTotalGrams ? 'Edit recipe' : 'Recipe builder'}</h3>
+      <h3 class="grow">${draft.isEdit ? 'Edit recipe' : 'Recipe builder'}</h3>
     </div>
     <label>Recipe name<input class="input" id="rb-name" value="${esc(draft.name)}" placeholder="e.g. Chicken burrito batch"></label>
     <div class="list" id="rb-ingredients">
@@ -1448,8 +1467,13 @@ function renderRecipeBuilder() {
     <button class="cook-pill" id="rb-batch">${draft.batchYield
       ? `🍳 Whole batch: ${esc(draft.batchYield.label)} −${Math.round((1 - draft.batchYield.factor) * 100)}%`
       : '🍳 Whole-batch cooking (cheesecake, casserole…): none'}</button>
-    <p class="hint">Weigh ingredients <b>raw</b> (g; for liquids use ml ≈ g). If you weighed one cooked, tap ⇄ to convert. A cooked batch weight at save time is optional — for dishes that lose or gain water in cooking.</p>
-    ${draft.cookedTotalGrams ? `<label>Cooked batch weight (g)<input class="input" id="rb-cooked" type="number" step="any" value="${draft.cookedTotalGrams}"></label>` : ''}
+    <p class="hint">Weigh ingredients <b>raw</b> (g; for liquids use ml ≈ g). If you weighed one cooked, tap ⇄ to convert.</p>
+    <label>Cooked batch weight (g) — optional
+      <input class="input" id="rb-cooked" type="number" inputmode="decimal" step="any" min="1"
+        value="${draft.cookedTotalGrams || ''}"
+        placeholder="blank = ${fg(anyYield ? estCooked : rawTotal)}g ${anyYield ? 'estimated' : 'raw total'}">
+    </label>
+    <p class="hint">Weighed the <b>finished</b> batch on the scale? Enter it here — it beats the estimate for dishes that lose or gain water in cooking.</p>
     <div class="recipe-footer card">
       <div class="rf-line big"><span>Total raw</span><span><b>${fg(rawTotal)} g</b> · <b>${f0(totals.kcal)}</b> kcal</span></div>
       ${anyYield && !draft.cookedTotalGrams ? `<div class="rf-line"><span>Est. cooked weight</span><span><b>${fg(estCooked)} g</b> from cook methods</span></div>` : ''}
@@ -1464,7 +1488,9 @@ function renderRecipeBuilder() {
   scr.querySelector('#rb-back').onclick = () => navTo('recipes');
   scr.querySelector('#rb-cancel').onclick = () => navTo('recipes');
   const cooked = scr.querySelector('#rb-cooked');
-  if (cooked) cooked.oninput = e => { draft.cookedTotalGrams = parseFloat(e.target.value) || null; };
+  cooked.oninput = e => { draft.cookedTotalGrams = parseFloat(e.target.value) || null; };
+  // refresh the per-100g footer once they're done typing (change = blur/enter)
+  cooked.onchange = () => renderRecipeBuilder();
 
   scr.querySelectorAll('.ing-row').forEach(row => {
     const i = +row.dataset.i;
