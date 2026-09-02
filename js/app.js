@@ -4,11 +4,11 @@ import {
   scale, sumLoose, sumStrict, macroKcal,
   f0, f1, fg, escapeHtml as esc,
 } from './models.js';
-import { YIELD_CATS, guessYield, guessYieldCat } from './yields.js';
+import { YIELD_CATS, guessYield, guessYieldCat, guessBatchYield } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v25';
+const APP_VERSION = 'v26';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -38,6 +38,7 @@ async function boot() {
   const saved = await DB.getSetting('settings');
   if (saved) settings = { ...settings, ...saved, targets: { ...settings.targets, ...(saved.targets || {}) } };
   await refreshFoods();
+  await repairSep2Data();
 
   document.querySelectorAll('#bottom-nav button').forEach(btn => {
     btn.onclick = () => navTo(btn.dataset.screen);
@@ -72,6 +73,71 @@ async function refreshFoods() {
 }
 
 async function saveSettings() { await DB.setSetting('settings', settings); }
+
+// ---------------------------------------------------------------- data repair
+// One-time fix (Sep 2026): three scanned foods were saved with per-SERVING
+// numbers sitting in per-100g fields (label-import poisoning), which silently
+// under-counted every recipe and log using them. Each fix only applies while
+// the stored values still match the known-bad ones, so a food the user already
+// hand-corrected is never touched. Afterwards every recipe is recomputed from
+// its ingredients (diary entries read the recipe live, so history heals too).
+async function repairSep2Data() {
+  if (settings.repairSep2026) return;
+  const near = (a, b) => a != null && Math.abs(a - b) <= b * 0.02 + 1e-4;
+  let changed = false;
+
+  for (const f of foods) {
+    const pg = f.perGram || {};
+    // Goldhen eggs: label is per egg (50g) — 6g protein / 5g fat per EGG were
+    // stored as per-100g, halving them. kcal was right.
+    if (f.barcode === '4099100296211' && near(pg.protein, 0.06) && near(pg.fat, 0.05)) {
+      Object.assign(pg, { protein: 0.12, fat: 0.10, satFat: 0.03, carbs: 0, sodium: 1.4 });
+      await DB.put('foods', f); changed = true;
+    }
+    // Manual banana entry: ~36 kcal/100g is impossible (bananas are ~89) —
+    // one banana's numbers were spread over the full weighed grams. USDA raw.
+    if (/organic banana/i.test(f.name || '') && near(pg.kcal, 0.364)) {
+      Object.assign(pg, { kcal: 0.89, protein: 0.011, carbs: 0.228, fat: 0.003, fiber: 0.026, sugar: 0.122, satFat: 0.001, sodium: 0.01 });
+      await DB.put('foods', f); changed = true;
+    }
+    // Jell-O SF cheesecake mix: 357 kcal/100g with 5g carbs, 0 fat, 0 protein
+    // is physically impossible — the label's 6g carbs per 7g serving is 86/100g.
+    if (f.barcode === '043000208120' && near(pg.kcal, 3.571) && pg.carbs != null && pg.carbs < 0.1) {
+      Object.assign(pg, { carbs: 0.857, sugar: 0, fat: 0, protein: 0 });
+      await DB.put('foods', f); changed = true;
+    }
+  }
+
+  if (changed) {
+    await refreshFoods();
+    for (const r of foods.filter(f => f.source === 'recipe')) {
+      // whole-dish recipes with no batch method get the name-based guess here
+      // too (a cheesecake loses ~10% baking — per-ingredient yields miss that)
+      if (!r.batchYield && !r.batchNone) {
+        const g = guessBatchYield(r.name);
+        if (g) r.batchYield = g;
+      }
+      const { totals, missing, rawTotal, estCooked, anyYield } = computeRecipe(r.ingredients, r.batchYield);
+      if (totals.kcal == null) continue;
+      const cookedG = r.cookedWeighed ? r.cookedTotalGrams : (anyYield ? estCooked : rawTotal);
+      if (!cookedG || cookedG <= 0) continue;
+      r.rawTotalGrams = rawTotal;
+      r.cookedTotalGrams = cookedG;
+      for (const k of NUTRIENTS) r.perGram[k] = totals[k] == null ? null : totals[k] / cookedG;
+      r.missingNutrients = missing;
+      for (const s of r.servings || []) {
+        if (s.name === 'whole batch') s.grams = cookedG;
+        if (s.name === '1/2 batch') s.grams = cookedG / 2;
+        if (s.name === '1/4 batch') s.grams = cookedG / 4;
+      }
+      await DB.put('foods', r);
+    }
+    await refreshFoods();
+    schedulePiBackup();
+  }
+  settings.repairSep2026 = true;
+  await saveSettings();
+}
 
 // ---------------------------------------------------------------- Pi backup
 
@@ -1437,12 +1503,13 @@ function openRecipeBuilder(existing) {
     // only a WEIGHED cooked weight is carried into editing; estimates recompute live
     cookedTotalGrams: existing.cookedWeighed ? existing.cookedTotalGrams : null,
     batchYield: existing.batchYield ? { ...existing.batchYield } : null,
+    batchNone: !!existing.batchNone,
     customServings: (existing.servings || []).filter(s => !/^(whole batch|1\/2 batch|1\/4 batch|g|oz)$/.test(s.name)).map(s => ({ ...s })),
     favorite: existing.favorite, lastUsed: existing.lastUsed,
     defaultServing: existing.defaultServing, defaultAmount: existing.defaultAmount,
   } : {
     id: uuid(), name: '', isEdit: false, ingredients: [], cookedTotalGrams: null, customServings: [],
-    batchYield: null,
+    batchYield: null, batchNone: false,
     favorite: false, lastUsed: null, defaultServing: null, defaultAmount: 1,
   };
   navTo('recipeEdit');
@@ -1451,6 +1518,12 @@ function openRecipeBuilder(existing) {
 
 function renderRecipeBuilder() {
   const scr = document.getElementById('screen-recipeEdit');
+  // whole-dish names (cheesecake, casserole…) auto-pick the batch cook method;
+  // the 🍳 pill overrides it, and an explicit "Not cooked" pick stops re-guessing
+  if (!draft.batchYield && !draft.batchNone) {
+    const g = guessBatchYield(draft.name);
+    if (g) draft.batchYield = g;
+  }
   const { totals, missing, rawTotal, estCooked, anyYield } = computeRecipe(draft.ingredients, draft.batchYield);
   // basis priority: weighed cooked > estimated-from-cook-methods > raw total
   const basis = draft.cookedTotalGrams || (anyYield ? estCooked : rawTotal);
@@ -1507,6 +1580,8 @@ function renderRecipeBuilder() {
     <button class="btn wide" id="rb-cancel">Cancel</button>`;
 
   scr.querySelector('#rb-name').oninput = e => { draft.name = e.target.value; };
+  // re-render on blur/enter so a whole-dish name refreshes the batch-method guess
+  scr.querySelector('#rb-name').onchange = () => renderRecipeBuilder();
   scr.querySelector('#rb-back').onclick = () => navTo('recipes');
   scr.querySelector('#rb-cancel').onclick = () => navTo('recipes');
   const cooked = scr.querySelector('#rb-cooked');
@@ -1546,6 +1621,7 @@ function renderRecipeBuilder() {
   scr.querySelector('#rb-scan').onclick = () => scanFlow(addIngredient);
   scr.querySelector('#rb-batch').onclick = () => openYieldPicker({ name: draft.name || 'this whole batch' }, y => {
     draft.batchYield = y;
+    draft.batchNone = !y; // "Not cooked" must stick — block the name-based re-guess
     renderRecipeBuilder();
   }, Math.max(0, YIELD_CATS.findIndex(c => c.name === 'Baked & whole dishes')));
   scr.querySelector('#rb-save').onclick = () => saveRecipeModal();
@@ -1641,6 +1717,7 @@ function saveRecipeModal() {
       cookedTotalGrams: cookedG,
       cookedWeighed: !!typed, // false = estimated/raw fallback, keeps re-estimating on edit
       batchYield: draft.batchYield || null,
+      batchNone: !!draft.batchNone,
       missingNutrients: missing,
     };
     await DB.put('foods', recipe);

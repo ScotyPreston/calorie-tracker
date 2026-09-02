@@ -87,6 +87,34 @@ export function guessYield(name) {
   return null;
 }
 
+// Whole-batch cook-method guess from a RECIPE name. A cheesecake or casserole
+// cooks as ONE dish, so per-ingredient yields alone miss most of the water loss
+// (only the eggs would shrink, not the batter). First matching rule wins; a
+// null label means "definitely not cooked — don't guess".
+const BATCH_GUESSES = [
+  [/no.?bake|overnight oat|icebox/i, null, null],
+  [/cheesecake/i, 'Cheesecake, baked', 0.90],
+  [/banana bread|zucchini bread|quick bread/i, 'Banana / quick bread', 0.88],
+  [/cake|muffin|brownie|cupcake/i, 'Cake / muffins / brownies', 0.88],
+  [/\bbread\b|\bloaf\b/i, 'Bread, baked', 0.87],
+  [/lasagna/i, 'Lasagna', 0.85],
+  [/meatloaf/i, 'Meatloaf, baked', 0.70],
+  [/casserole|pasta bake|\bbake\b/i, 'Casserole / pasta bake', 0.85],
+  [/sheet.?pan/i, 'Sheet-pan bake (meat + veg), oven', 0.78],
+  [/air.?fr(y|ied|yer)/i, 'Air-fried batch', 0.76],
+  [/stir.?fry|\bwok\b/i, 'Stir-fry, wok or skillet', 0.78],
+  [/soup|stew|chili/i, 'Soup / stew, simmered uncovered', 0.85],
+  [/slow.?cook|crock.?pot/i, 'Slow cooker (lid on)', 0.95],
+  [/instant.?pot|pressure.?cook/i, 'Instant Pot / pressure cooker', 0.95],
+];
+
+export function guessBatchYield(name) {
+  for (const [re, label, factor] of BATCH_GUESSES) {
+    if (re.test(name || '')) return label ? { label, factor } : null;
+  }
+  return null;
+}
+
 // Best-guess converter CATEGORY from a food's name. Only the category — the
 // exact cut / lean % is always picked per log, because 80/20 and 93/7 (or
 // breast vs thigh) lose different amounts of weight.
