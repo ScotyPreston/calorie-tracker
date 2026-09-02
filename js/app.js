@@ -8,7 +8,7 @@ import { YIELD_CATS, guessYield, guessYieldCat } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v21';
+const APP_VERSION = 'v22';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -411,8 +411,12 @@ function openFoodDetail(food, ctx = {}) {
   // the default and 'raw' (portioned before cooking) converts via the batch's
   // own raw→cooked ratio instead of a picked cook method.
   const isRecipe = food.source === 'recipe';
-  const recipeRatio = (isRecipe && food.rawTotalGrams > 0 && food.cookedTotalGrams > 0)
+  const storedRatio = (isRecipe && food.rawTotalGrams > 0 && food.cookedTotalGrams > 0)
     ? food.cookedTotalGrams / food.rawTotalGrams : 1;
+  // recipes saved without a cooked weight have ratio 1 (raw = cooked), which
+  // makes the Raw tab a no-op — so a per-log batch method can be picked instead
+  let recipeMethod = null;
+  const recipeRatio = () => recipeMethod ? recipeMethod.factor : storedRatio;
   let weighMode = isRecipe ? 'cooked' : 'raw';
   let cookMethod = null;
   let amount = entry ? (entry.amount || entry.grams) : (food.defaultAmount || 1);
@@ -430,7 +434,7 @@ function openFoodDetail(food, ctx = {}) {
     const isCooked = weighMode === 'cooked' && !!cookMethod;
     const recipeRaw = isRecipe && weighMode === 'raw';
     const grams = isCooked ? typedGrams / cookMethod.factor
-      : recipeRaw ? typedGrams * recipeRatio
+      : recipeRaw ? typedGrams * recipeRatio()
       : typedGrams;
     const n = scale(food.perGram, grams);
     const mk = macroKcal(n);
@@ -477,9 +481,15 @@ function openFoodDetail(food, ctx = {}) {
           ${isCooked ? `<button class="cook-pill" id="fd-method">${esc(cookMethod.label)} ${cookMethod.factor > 1
             ? `+${Math.round((cookMethod.factor - 1) * 100)}%`
             : `−${Math.round((1 - cookMethod.factor) * 100)}%`}</button>` : ''}
-          ${recipeRaw && recipeRatio !== 1 ? `<span class="cook-pill">batch ${recipeRatio > 1
-            ? `+${Math.round((recipeRatio - 1) * 100)}%`
-            : `−${Math.round((1 - recipeRatio) * 100)}%`}</span>` : ''}
+          ${recipeRaw ? `<button class="cook-pill" id="fd-rmethod">${recipeMethod
+            ? `${esc(recipeMethod.label)} ${recipeMethod.factor > 1
+              ? `+${Math.round((recipeMethod.factor - 1) * 100)}%`
+              : `−${Math.round((1 - recipeMethod.factor) * 100)}%`}`
+            : recipeRatio() !== 1
+            ? `batch ${recipeRatio() > 1
+              ? `+${Math.round((recipeRatio() - 1) * 100)}%`
+              : `−${Math.round((1 - recipeRatio()) * 100)}%`}`
+            : 'pick how it was cooked'}</button>` : ''}
         </div>
         <div class="fd-controls">
           ${settings.groupsEnabled ? `<label>Meal<select class="input" id="fd-group">
@@ -523,13 +533,25 @@ function openFoodDetail(food, ctx = {}) {
       if (!y) { weighMode = 'raw'; } else { cookMethod = y; weighMode = 'cooked'; }
       render();
     }, guessYieldCat(food.name) ?? 0);
+    // recipe with no saved cooked weight: picking a batch method here (like the
+    // cook-method pick on plain foods) supplies the missing raw→cooked ratio
+    const pickRecipeMethod = () => openYieldPicker({ name: food.name }, y => {
+      recipeMethod = y; // null = "not cooked" (×1)
+      weighMode = 'raw';
+      render();
+    }, Math.max(0, YIELD_CATS.findIndex(c => c.name === 'Baked & whole dishes')));
     const rawBtn = overlayBack.querySelector('#fd-w-raw');
-    if (rawBtn) rawBtn.onclick = () => { weighMode = 'raw'; render(); };
+    if (rawBtn) rawBtn.onclick = () => {
+      if (isRecipe && recipeRatio() === 1 && !recipeMethod) pickRecipeMethod();
+      else { weighMode = 'raw'; render(); }
+    };
     const cookedBtn = overlayBack.querySelector('#fd-w-cooked');
     if (cookedBtn) cookedBtn.onclick = () => {
       // recipe perGram is already cooked-basis — no cook method to pick
       if (isRecipe || cookMethod) { weighMode = 'cooked'; render(); } else pickMethod();
     };
+    const rMethodBtn = overlayBack.querySelector('#fd-rmethod');
+    if (rMethodBtn) rMethodBtn.onclick = pickRecipeMethod;
     const methodBtn = overlayBack.querySelector('#fd-method');
     if (methodBtn) methodBtn.onclick = pickMethod;
     const gsel = overlayBack.querySelector('#fd-group');
@@ -575,7 +597,7 @@ function openFoodDetail(food, ctx = {}) {
       }
       // recipe weighed raw: store the COOKED-equivalent (recipe perGram basis)
       if (isRecipe && weighMode === 'raw') {
-        g = g * recipeRatio;
+        g = g * recipeRatio();
         logAmount = Math.round(g * 10) / 10;
         logServing = 'g';
       }
