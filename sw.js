@@ -1,6 +1,6 @@
 // Service worker: cache the app shell so the tracker works fully offline.
 // Bump VERSION on every deploy so clients pick up new files.
-const VERSION = 'ct-v26';
+const VERSION = 'ct-v27';
 
 const SHELL = [
   './',
@@ -43,7 +43,9 @@ self.addEventListener('fetch', (e) => {
   if (!cacheable) return;
 
   e.respondWith(
-    caches.match(req).then(hit => {
+    // match ONLY this version's cache — matching across old caches can serve a
+    // mixed set of module files mid-update, which breaks imports at boot
+    caches.open(VERSION).then(c => c.match(req)).then(hit => {
       if (hit) return hit;
       return fetch(req).then(resp => {
         if (resp && (resp.ok || resp.type === 'opaque')) {

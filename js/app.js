@@ -1,14 +1,14 @@
 import * as DB from './db.js';
 import {
   NUTRIENTS, uuid, todayStr, addDays, fmtDateHuman,
-  scale, sumLoose, sumStrict, macroKcal,
+  scale, sumLoose, sumStrict, macroKcal, labelLooksOff,
   f0, f1, fg, escapeHtml as esc,
 } from './models.js';
 import { YIELD_CATS, guessYield, guessYieldCat, guessBatchYield } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v26';
+const APP_VERSION = 'v27';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -47,7 +47,12 @@ async function boot() {
 
   // safety-net backup to the Pi shortly after every open (quiet if unreachable)
   setTimeout(() => piBackupNow(false), 5000);
+}
 
+// Registered OUTSIDE boot(): if boot ever throws (e.g. a bad cache served
+// mixed module versions), the service worker update path must still run so
+// the next deploy can heal the app instead of bricking it.
+function registerSW() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').then(reg => {
       // iOS PWAs are lazy about update checks — force one on open and on re-focus
@@ -524,9 +529,6 @@ function openFoodDetail(food, ctx = {}) {
       segs = `<circle cx="60" cy="60" r="${R}" fill="none" stroke="var(--line)" stroke-width="10"/>`;
     }
 
-    const microRow = (label, val, unit) => `
-      <div class="micro-row"><span>${label}</span><span>${val == null ? '—' : fg(val) + ' ' + unit}</span></div>`;
-
     overlayBack.innerHTML = `
       <div class="overlay-card">
         <div class="sheet-head">
@@ -579,10 +581,7 @@ function openFoodDetail(food, ctx = {}) {
             <div><i style="background:var(--c-fat)"></i>Fat <b>${fg(n.fat)}g</b> <span class="dim">${pctOf(mk.fat)}</span></div>
           </div>
         </div>
-        <div class="micro-block">
-          ${microRow('Fiber', n.fiber, 'g')}${microRow('Sugar', n.sugar, 'g')}
-          ${microRow('Sat. Fat', n.satFat, 'g')}${microRow('Sodium', n.sodium, 'mg')}
-        </div>
+        ${labelLooksOff(food.perGram) ? `<p class="hint warn">⚠ Calories don't match this label's macros — the data may be per-serving numbers. Tap ${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'} and double-check the label.</p>` : ''}
         <div class="row gap">
           ${food._unsaved ? '' : `<button class="btn small" id="fd-edit">${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'}</button>`}
           ${food.barcode && !food._unsaved ? '<button class="btn small" id="fd-refresh">↻ Refresh data</button>' : ''}
@@ -2107,6 +2106,7 @@ function renderSettings() {
 
 window.__offToFood = offToFood; // debugging handle for verifying parser fixes
 
+registerSW(); // first — must run even if boot fails, so updates can heal the app
 boot().catch(err => {
   document.body.insertAdjacentHTML('beforeend',
     `<div style="padding:16px;color:#f87171">App failed to start: ${esc(err.message)}</div>`);

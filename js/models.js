@@ -89,6 +89,18 @@ export function macroKcal(n) {
   };
 }
 
+// Label sanity: stated calories vs calories computed from the macros (4/4/9).
+// A big disagreement almost always means per-SERVING numbers landed in the
+// per-100g fields (the import poisoning that halved the eggs' protein).
+// Only runs when all three macros are present — partial data isn't evidence.
+export function labelLooksOff(perGram) {
+  if (!perGram || perGram.kcal == null) return false;
+  if (perGram.protein == null || perGram.carbs == null || perGram.fat == null) return false;
+  const fromMacros = perGram.protein * 4 + perGram.carbs * 4 + perGram.fat * 9;
+  if (perGram.kcal < 0.15 && fromMacros < 0.15) return false; // near-zero foods: rounding noise
+  return Math.abs(perGram.kcal - fromMacros) / Math.max(perGram.kcal, fromMacros) > 0.35;
+}
+
 // ---- Formatting ----
 
 export function f1(n) { return n == null ? '—' : (Math.round(n * 10) / 10).toFixed(1); }
