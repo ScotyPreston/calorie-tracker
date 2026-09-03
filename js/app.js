@@ -6,9 +6,10 @@ import {
 } from './models.js';
 import { YIELD_CATS, guessYield, guessYieldCat, guessBatchYield } from './yields.js';
 import { scanBarcode, codeCandidates } from './scanner.js';
+import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v28';
+const APP_VERSION = 'v29';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -582,6 +583,7 @@ function openFoodDetail(food, ctx = {}) {
           </div>
         </div>
         ${labelLooksOff(food.perGram) ? `<p class="hint warn">⚠ Calories don't match this label's macros — the data may be per-serving numbers. Tap ${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'} and double-check the label.</p>` : ''}
+        ${food.verify ? `<p class="hint warn">⚠ Nutrition databases disagree about this product — compare these numbers against the package. Tap Edit food to fix them (saving clears this warning).</p>` : ''}
         <div class="row gap">
           ${food._unsaved ? '' : `<button class="btn small" id="fd-edit">${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'}</button>`}
           ${food.barcode && !food._unsaved ? '<button class="btn small" id="fd-refresh">↻ Refresh data</button>' : ''}
@@ -943,6 +945,7 @@ function openFoodForm(existing, { barcode = '', onSaved = null, prefill = null }
     f.servings = servings;
     if (!f.servings.some(s => s.name === f.defaultServing)) { f.defaultServing = sName; f.defaultAmount = 1; }
     delete f._unsaved;
+    delete f.verify; // user reviewed against the package — the disagree warning clears
     await DB.put('foods', f);
     await refreshFoods();
     schedulePiBackup();
@@ -987,6 +990,61 @@ async function scanFlow(onPick = null) {
 }
 
 // fetch + parse one barcode from Open Food Facts; returns an unsaved food or null
+// Build a food from the trusted-label override table (values typed off the
+// real package) — checked before any online source.
+function overrideFood(code) {
+  const o = labelOverride(code);
+  if (!o) return null;
+  const ps = o.perServing, g = o.servingGrams;
+  const per = (v) => (v == null) ? null : v / g;
+  const servings = [{ name: o.servingName, grams: g }, { name: 'oz', grams: 28.35 }, { name: 'g', grams: 1 }];
+  ensureMlServing({ servings });
+  return {
+    id: uuid(), name: o.name, barcode: code, source: 'label',
+    perGram: {
+      kcal: per(ps.kcal), protein: per(ps.protein), carbs: per(ps.carbs), fat: per(ps.fat),
+      fiber: per(ps.fiber), sugar: per(ps.sugar), sodium: per(ps.sodium), satFat: per(ps.satFat),
+    },
+    servings, defaultServing: o.servingName, defaultAmount: 1,
+    favorite: false, lastUsed: null,
+  };
+}
+
+// Second-witness check: USDA's branded database holds manufacturer label data,
+// so an OFF import whose MAJORS disagree with it gets flagged for a label check.
+// Needed because mixed-basis poisoning (per-serving values in _100g fields for
+// only SOME nutrients — the Sola bagels bug) is internally consistent and
+// mathematically undetectable from one source; only a second source catches it.
+// USDA can also be stale (old formulations), so a mismatch only warns — it
+// never auto-replaces numbers. Any failure (offline, rate-limited DEMO_KEY,
+// product not in USDA) silently skips the check.
+async function usdaDisagrees(food) {
+  const q = String(food.barcode || '').replace(/^0+/, '');
+  if (!q) return false;
+  try {
+    const key = settings.usdaKey || 'DEMO_KEY';
+    const resp = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&dataType=Branded&pageSize=1`);
+    if (!resp.ok) return false;
+    const d = await resp.json();
+    const r = (d.foods || [])[0];
+    if (!r || String(r.gtinUpc || '').replace(/^0+/, '') !== q) return false;
+    const byId = {};
+    for (const n of r.foodNutrients || []) byId[n.nutrientId] = n.value;
+    const per100 = (id) => (typeof byId[id] === 'number') ? byId[id] / 100 : null;
+    const usda = { kcal: usdaKcal100(r), protein: per100(1003), carbs: per100(1005), fat: per100(1004) };
+    // flag only differences too big for label rounding: >15% AND >2g per 100g
+    // for macros (>25 kcal per 100g for calories)
+    const checks = [['kcal', 25], ['protein', 2], ['carbs', 2], ['fat', 2]];
+    for (const [k, minAbs100] of checks) {
+      const a = food.perGram[k], b = usda[k];
+      if (a == null || b == null) continue;
+      const diff = Math.abs(a - b);
+      if (diff * 100 > minAbs100 && diff / Math.max(a, b) > 0.15) return true;
+    }
+    return false;
+  } catch (e) { return false; }
+}
+
 async function fetchOffByCode(code) {
   let data;
   try {
@@ -999,7 +1057,8 @@ async function fetchOffByCode(code) {
   if (!data || data.status !== 1 || !data.product) return null;
   const food = offToFood(data.product, code);
   if (!food) return null;
-  await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined, _checkLabel: undefined }, cachedAt: new Date().toISOString(), v: 2 });
+  if (await usdaDisagrees(food)) food.verify = true;
+  await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined, _checkLabel: undefined }, cachedAt: new Date().toISOString(), v: 3 });
   return food;
 }
 
@@ -1008,7 +1067,8 @@ async function fetchOffByCode(code) {
 async function refreshBarcodeFood(food) {
   const codes = codeCandidates(food.barcode, '');
   let fresh = null;
-  for (const c of codes) { fresh = await fetchOffByCode(c); if (fresh) break; }
+  for (const c of codes) { fresh = overrideFood(c); if (fresh) break; }
+  for (const c of codes) { if (fresh) break; fresh = await fetchOffByCode(c); }
   if (!fresh) {
     for (const c of codes) {
       const item = await nixItem('upc=' + encodeURIComponent(c));
@@ -1016,10 +1076,11 @@ async function refreshBarcodeFood(food) {
     }
   }
   if (!fresh) return null;
-  const warn = !!fresh._checkLabel;
+  const warn = !!fresh._checkLabel || !!fresh.verify;
   food.perGram = fresh.perGram;
   food.servings = fresh.servings;
   food.source = fresh.source;
+  if (fresh.verify) food.verify = true; else delete food.verify;
   if (!food.servings.some(s => s.name === food.defaultServing)) {
     food.defaultServing = fresh.defaultServing;
     food.defaultAmount = fresh.defaultAmount;
@@ -1053,9 +1114,13 @@ async function lookupBarcode(candidates) {
     }
   }
   for (const code of candidates) {
+    const o = overrideFood(code);
+    if (o) return saveScannedFood(o);
+  }
+  for (const code of candidates) {
     const cached = await DB.get('scanCache', code);
-    // v2 = cached by the basis-checking parser; older cached lookups get refetched
-    if (cached && cached.v === 2) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
+    // v3 = cached by the cross-checking parser; older cached lookups get refetched
+    if (cached && cached.v === 3) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
   }
   for (const code of candidates) {
     const food = await fetchOffByCode(code);
@@ -1063,6 +1128,8 @@ async function lookupBarcode(candidates) {
     if (food._checkLabel) {
       delete food._checkLabel;
       setTimeout(() => toast('⚠ This product’s database entry looked off — double-check the numbers against the label'), 600);
+    } else if (food.verify) {
+      setTimeout(() => toast('⚠ Nutrition databases disagree about this product — double-check the label'), 600);
     }
     return saveScannedFood(food);
   }
@@ -1073,7 +1140,7 @@ async function lookupBarcode(candidates) {
       const food = nixToFood(item);
       if (food) {
         food.barcode = code;
-        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 2 });
+        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 3 });
         return saveScannedFood(food);
       }
     }
