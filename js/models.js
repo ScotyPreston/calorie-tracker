@@ -93,12 +93,20 @@ export function macroKcal(n) {
 // A big disagreement almost always means per-SERVING numbers landed in the
 // per-100g fields (the import poisoning that halved the eggs' protein).
 // Only runs when all three macros are present — partial data isn't evidence.
+// Carbs legitimately contribute anywhere from 0 to 4 kcal/g: fiber, allulose,
+// and sugar alcohols count toward the carb line but add few or no calories
+// (low-carb products like Sola bagels). So stated kcal is only suspicious when
+// it falls OUTSIDE the whole plausible range — above the 4/4/9 ceiling, or
+// below the protein+fat-only floor.
 export function labelLooksOff(perGram) {
   if (!perGram || perGram.kcal == null) return false;
   if (perGram.protein == null || perGram.carbs == null || perGram.fat == null) return false;
-  const fromMacros = perGram.protein * 4 + perGram.carbs * 4 + perGram.fat * 9;
-  if (perGram.kcal < 0.15 && fromMacros < 0.15) return false; // near-zero foods: rounding noise
-  return Math.abs(perGram.kcal - fromMacros) / Math.max(perGram.kcal, fromMacros) > 0.35;
+  const hi = perGram.protein * 4 + perGram.carbs * 4 + perGram.fat * 9;
+  const lo = perGram.protein * 4 + perGram.fat * 9;
+  if (perGram.kcal < 0.15 && hi < 0.15) return false; // near-zero foods: rounding noise
+  if (perGram.kcal > hi) return (perGram.kcal - hi) / Math.max(perGram.kcal, hi) > 0.35;
+  if (perGram.kcal < lo) return (lo - perGram.kcal) / Math.max(perGram.kcal, lo) > 0.35;
+  return false;
 }
 
 // ---- Formatting ----

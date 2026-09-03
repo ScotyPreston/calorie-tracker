@@ -8,7 +8,7 @@ import { YIELD_CATS, guessYield, guessYieldCat, guessBatchYield } from './yields
 import { scanBarcode, codeCandidates } from './scanner.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v27';
+const APP_VERSION = 'v28';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
