@@ -98,15 +98,23 @@ export function macroKcal(n) {
 // (low-carb products like Sola bagels). So stated kcal is only suspicious when
 // it falls OUTSIDE the whole plausible range — above the 4/4/9 ceiling, or
 // below the protein+fat-only floor.
-export function labelLooksOff(perGram) {
+// servingGrams (optional) = the label's serving size. Tiny servings — a 16g
+// tablespoon of ketchup — round hard (kcal to the nearest 5-10, macros to whole
+// grams), and scaling to 100g multiplies that rounding error ~6x, so "10 kcal
+// but 1g carbs" per tbsp is legal label rounding, not bad data. A mismatch
+// worth ≤10 kcal in ONE label serving is never worth a warning.
+export function labelLooksOff(perGram, servingGrams) {
   if (!perGram || perGram.kcal == null) return false;
   if (perGram.protein == null || perGram.carbs == null || perGram.fat == null) return false;
   const hi = perGram.protein * 4 + perGram.carbs * 4 + perGram.fat * 9;
   const lo = perGram.protein * 4 + perGram.fat * 9;
   if (perGram.kcal < 0.15 && hi < 0.15) return false; // near-zero foods: rounding noise
-  if (perGram.kcal > hi) return (perGram.kcal - hi) / Math.max(perGram.kcal, hi) > 0.35;
-  if (perGram.kcal < lo) return (lo - perGram.kcal) / Math.max(perGram.kcal, lo) > 0.35;
-  return false;
+  let gap = 0;
+  if (perGram.kcal > hi && (perGram.kcal - hi) / Math.max(perGram.kcal, hi) > 0.35) gap = perGram.kcal - hi;
+  else if (perGram.kcal < lo && (lo - perGram.kcal) / Math.max(perGram.kcal, lo) > 0.35) gap = lo - perGram.kcal;
+  if (!gap) return false;
+  if (servingGrams > 0 && gap * servingGrams <= 10) return false;
+  return true;
 }
 
 // ---- Formatting ----

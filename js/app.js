@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v29';
+const APP_VERSION = 'v30';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -582,7 +582,7 @@ function openFoodDetail(food, ctx = {}) {
             <div><i style="background:var(--c-fat)"></i>Fat <b>${fg(n.fat)}g</b> <span class="dim">${pctOf(mk.fat)}</span></div>
           </div>
         </div>
-        ${labelLooksOff(food.perGram) ? `<p class="hint warn">⚠ Calories don't match this label's macros — the data may be per-serving numbers. Tap ${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'} and double-check the label.</p>` : ''}
+        ${labelLooksOff(food.perGram, labelServingGrams(food)) ? `<p class="hint warn">⚠ Calories don't match this label's macros — the data may be per-serving numbers. Tap ${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'} and double-check the label.</p>` : ''}
         ${food.verify ? `<p class="hint warn">⚠ Nutrition databases disagree about this product — compare these numbers against the package. Tap Edit food to fix them (saving clears this warning).</p>` : ''}
         <div class="row gap">
           ${food._unsaved ? '' : `<button class="btn small" id="fd-edit">${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'}</button>`}
@@ -992,6 +992,13 @@ async function scanFlow(onPick = null) {
 // fetch + parse one barcode from Open Food Facts; returns an unsaved food or null
 // Build a food from the trusted-label override table (values typed off the
 // real package) — checked before any online source.
+// The label's own serving size in grams (first serving that isn't the g/oz/ml
+// units every food gets) — lets labelLooksOff judge rounding at label scale.
+function labelServingGrams(food) {
+  const s = food.servings && food.servings[0];
+  return (s && s.grams > 1 && s.grams !== 28.35) ? s.grams : 0;
+}
+
 function overrideFood(code) {
   const o = labelOverride(code);
   if (!o) return null;
@@ -1058,7 +1065,7 @@ async function fetchOffByCode(code) {
   const food = offToFood(data.product, code);
   if (!food) return null;
   if (await usdaDisagrees(food)) food.verify = true;
-  await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined, _checkLabel: undefined }, cachedAt: new Date().toISOString(), v: 3 });
+  await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined, _checkLabel: undefined }, cachedAt: new Date().toISOString(), v: 4 });
   return food;
 }
 
@@ -1077,6 +1084,10 @@ async function refreshBarcodeFood(food) {
   }
   if (!fresh) return null;
   const warn = !!fresh._checkLabel || !!fresh.verify;
+  // a saved placeholder name ("(Heinz)", "Product 0130…") adopts the fresh
+  // record's real name; a real saved name is kept — it's the user's identity
+  const isPlaceholder = (n) => !String(n || '').trim() || /^\(.*\)$/.test(n.trim()) || /^Product \d/.test(n.trim());
+  if (isPlaceholder(food.name) && !isPlaceholder(fresh.name)) food.name = fresh.name;
   food.perGram = fresh.perGram;
   food.servings = fresh.servings;
   food.source = fresh.source;
@@ -1119,8 +1130,8 @@ async function lookupBarcode(candidates) {
   }
   for (const code of candidates) {
     const cached = await DB.get('scanCache', code);
-    // v3 = cached by the cross-checking parser; older cached lookups get refetched
-    if (cached && cached.v === 3) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
+    // v4 = cached by the mixed-basis-repairing parser; older cached lookups get refetched
+    if (cached && cached.v === 4) return saveScannedFood({ ...cached.food, id: uuid(), barcode: code });
   }
   for (const code of candidates) {
     const food = await fetchOffByCode(code);
@@ -1140,7 +1151,7 @@ async function lookupBarcode(candidates) {
       const food = nixToFood(item);
       if (food) {
         food.barcode = code;
-        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 3 });
+        await DB.put('scanCache', { barcode: code, food: { ...food, id: undefined }, cachedAt: new Date().toISOString(), v: 4 });
         return saveScannedFood(food);
       }
     }
@@ -1239,6 +1250,25 @@ function offToFood(p, barcode) {
     }
   }
 
+  // The REVERSE mixed poisoning (Scot's Hellmann's Light Mayo, 9-04): calories
+  // are true per-100g but the whole macro row is per-SERVING typed into the
+  // _100g fields — 3.5g fat can't make 233 kcal. No physical impossibility
+  // inside the row itself, but calories sit far ABOVE the 4/4/9 ceiling, and
+  // rescaling the macros by 100/serving-grams makes them agree with the stated
+  // calories. Rescale the macro row (sodium rides along — it's the same
+  // mistyped panel column), never the calories.
+  if (scale && !repaired.length && perGram.kcal != null) {
+    const pg = perGram;
+    const e1 = (pg.protein ?? 0) * 4 + (pg.carbs ?? 0) * 4 + (pg.fat ?? 0) * 9;
+    const e2 = e1 * scale;
+    if (e1 > 0 && pg.kcal / e1 > 1.5 && pg.kcal / e2 > 0.7 && pg.kcal / e2 < 1.3) {
+      for (const k of ['protein', 'carbs', 'fat', 'satFat', 'sugar', 'fiber', 'sodium']) {
+        if (pg[k] != null) pg[k] *= scale;
+      }
+      repaired.push('macros');
+    }
+  }
+
   // Atwater sanity: stated calories should roughly match 4/4/9 from the macros
   const est = (perGram.protein ?? 0) * 4 + (perGram.carbs ?? 0) * 4 + (perGram.fat ?? 0) * 9;
   const suspicious = poisoned || repaired.length > 0 ||
@@ -1251,7 +1281,11 @@ function offToFood(p, barcode) {
   servings.push({ name: 'oz', grams: 28.35 });
   servings.push({ name: 'g', grams: 1 });
   ensureMlServing({ servings });
-  const name = [p.product_name, p.brands ? `(${p.brands.split(',')[0].trim()})` : ''].filter(Boolean).join(' ').trim() || `Product ${barcode}`;
+  // never name a food just "(Heinz)" — a record with no product name gets an
+  // explicit placeholder so a later Refresh can adopt the real name
+  const baseName = [p.product_name, p.product_name_en, p.generic_name, p.abbreviated_product_name]
+    .map(v => (v || '').trim()).find(Boolean) || `Product ${barcode}`;
+  const name = [baseName, p.brands ? `(${p.brands.split(',')[0].trim()})` : ''].filter(Boolean).join(' ').trim();
   return {
     id: uuid(), name, barcode, source: 'openfoodfacts', perGram, servings,
     defaultServing: servings[0].name, defaultAmount: qty > 0 ? 1 : 100,
