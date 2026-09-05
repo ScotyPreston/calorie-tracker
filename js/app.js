@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v30';
+const APP_VERSION = 'v31';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -229,23 +229,30 @@ function groupForNow() {
   return 'Snacks';
 }
 
-// liquids: derive a 1-ml unit from any serving whose name carries an ml quantity,
-// e.g. "1 portion (240 ml)" at 240g → ml = 1g. Skipped when no ml amount is named,
-// so dry foods never get a fake density.
+// ml is a first-class unit like g on every food. Density comes from any serving
+// whose name carries an ml quantity, e.g. "1 portion (240 ml)" at 252g →
+// ml = 1.05g. Without one, ml falls back to water density (1 ml = 1 g) — right
+// for water and within a few % for most drinks; for thick liquids (oil, honey,
+// syrup) the true weight can be set by editing the food's "ml" serving row.
+// Skipped only when the food has no real 'g' unit (no published gram weight),
+// where an ml number would lie the same way grams would.
 function ensureMlServing(food) {
   const list = food.servings || [];
   if (list.some(s => s.name === 'ml')) return false;
+  let mlGrams = 0;
   for (const s of list) {
     const m = /(\d+(?:\.\d+)?)\s*ml\b/i.exec(s.name || '');
     const mlQty = m ? parseFloat(m[1]) : 0;
-    if (mlQty > 0 && s.grams > 0) {
-      const ml = { name: 'ml', grams: Math.round(s.grams / mlQty * 1000) / 1000 };
-      const gIdx = list.findIndex(x => x.name === 'g');
-      if (gIdx >= 0) list.splice(gIdx, 0, ml); else list.push(ml);
-      return true;
-    }
+    if (mlQty > 0 && s.grams > 0) { mlGrams = Math.round(s.grams / mlQty * 1000) / 1000; break; }
   }
-  return false;
+  const gIdx = list.findIndex(x => x.name === 'g');
+  if (!mlGrams) {
+    if (gIdx < 0) return false;
+    mlGrams = 1;
+  }
+  const ml = { name: 'ml', grams: mlGrams };
+  if (gIdx >= 0) list.splice(gIdx, 0, ml); else list.push(ml);
+  return true;
 }
 
 function servingDesc(food) {
@@ -1732,7 +1739,7 @@ function gramsPrompt(food, cb) {
     <div class="sheet-head"><h3>${esc(food.name)}</h3><button class="icon-btn" data-close>✕</button></div>
     <label>Weight (g — for liquids ml ≈ g)<input class="input" id="gp-grams" type="number" inputmode="decimal" step="any" min="0" placeholder="raw weight in grams"></label>
     <div class="row gap wrap">
-      ${(food.servings || []).filter(s => s.name !== 'g').map(s => `<button class="chip" data-g="${s.grams}">1 ${esc(s.name)} (${fg(s.grams)}g)</button>`).join('')}
+      ${(food.servings || []).filter(s => s.name !== 'g' && !(s.name === 'ml' && s.grams === 1)).map(s => `<button class="chip" data-g="${s.grams}">1 ${esc(s.name)} (${fg(s.grams)}g)</button>`).join('')}
     </div>
     <button class="btn small" id="gp-convert">⇄ I weighed it cooked</button>
     <button class="btn primary wide" id="gp-ok">Add ingredient</button>`);
