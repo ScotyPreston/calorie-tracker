@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v32';
+const APP_VERSION = 'v33';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -657,6 +657,12 @@ function openFoodDetail(food, ctx = {}) {
       if (!r) { toast('No fresh data found for this barcode'); return; }
       food = r.food;
       ensureMlServing(food);
+      // the fresh record may rename its servings — falling back to a stale
+      // name would quietly display per-1g numbers
+      if (!(food.servings || []).some(s => s.name === servingName)) {
+        servingName = food.defaultServing || 'g';
+        amount = food.defaultAmount || 1;
+      }
       render();
       toast(r.warn ? 'Refreshed — but this product’s database entry looks shaky, double-check the label' : 'Product data refreshed ✓');
     };

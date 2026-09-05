@@ -28,6 +28,17 @@ const OVERRIDES = {
     servingName: 'bagel', servingGrams: 85,
     perServing: { kcal: 110, protein: 15, carbs: 35, fat: 3, fiber: 30, sugar: 1, sodium: 290, satFat: 0 },
   },
+  // Cary's Sugar Free Low Calorie Syrup — OFF has the label's per-SERVING
+  // kcal typed into per-100g (10 kcal/100 on syrup that's really 25) and
+  // sodium 1000× low; carbs are sugar alcohols so the Atwater checks can't
+  // see any of it. USDA branded GTIN 053900000328 = 25 kcal / 10g carbs /
+  // 0 fat / 0 protein / 183mg sodium per 100ml — these 2-tbsp numbers are
+  // exactly that ÷ 100 × 30 (ml ≈ g for logging). Added 2026-09-05.
+  '53900000328': {
+    name: "Sugar Free Low Calorie Syrup (Cary's)",
+    servingName: '2 tbsp (30 ml)', servingGrams: 30,
+    perServing: { kcal: 7.5, protein: 0, carbs: 3, fat: 0, fiber: null, sugar: 0, sodium: 55, satFat: 0 },
+  },
 };
 
 export function labelOverride(code) {

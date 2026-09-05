@@ -1,6 +1,6 @@
 // Service worker: cache the app shell so the tracker works fully offline.
 // Bump VERSION on every deploy so clients pick up new files.
-const VERSION = 'ct-v32';
+const VERSION = 'ct-v33';
 
 const SHELL = [
   './',
@@ -20,7 +20,15 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache:'reload' bypasses the browser's HTTP cache — plain addAll can fill a
+  // NEW version's cache with STALE file bytes (a still-fresh HTTP-cache copy),
+  // shipping an update whose files never changed (caught live with v33)
+  e.waitUntil(caches.open(VERSION)
+    .then(c => Promise.all(SHELL.map(u => fetch(u, { cache: 'reload' }).then(r => {
+      if (!r.ok) throw new Error('shell fetch failed: ' + u);
+      return c.put(u, r);
+    }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
