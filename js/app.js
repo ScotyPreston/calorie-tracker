@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v33';
+const APP_VERSION = 'v34';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -596,6 +596,7 @@ function openFoodDetail(food, ctx = {}) {
         <div class="row gap">
           ${food._unsaved ? '' : `<button class="btn small" id="fd-edit">${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'}</button>`}
           ${food.barcode && !food._unsaved ? '<button class="btn small" id="fd-refresh">↻ Refresh data</button>' : ''}
+          ${food.source !== 'recipe' && !food._unsaved ? '<button class="btn small" id="fd-relabel">🏷 Label photo</button>' : ''}
           ${food.source === 'recipe' ? '<button class="btn small" id="fd-label">Nutrition label</button>' : ''}
         </div>
         <button class="btn primary wide" id="fd-log">${mode === 'edit-entry' ? 'Update Entry' : 'Add to Diary'}</button>
@@ -650,8 +651,16 @@ function openFoodDetail(food, ctx = {}) {
     };
     const labelBtn = overlayBack.querySelector('#fd-label');
     if (labelBtn) labelBtn.onclick = () => openLabel(food);
+    const relabelBtn = overlayBack.querySelector('#fd-relabel');
+    if (relabelBtn) relabelBtn.onclick = () => {
+      close();
+      pickLabelPhoto(null, { into: food, barcode: food.barcode || null });
+    };
     const refreshBtn = overlayBack.querySelector('#fd-refresh');
     if (refreshBtn) refreshBtn.onclick = async () => {
+      // numbers the user saved off the package are the truth — online data
+      // never replaces them without an explicit ok
+      if (food.labelVerified && !confirm('This food’s numbers were saved from the package label. Replace them with online data?')) return;
       toast('Refreshing product data…');
       const r = await refreshBarcodeFood(food);
       if (!r) { toast('No fresh data found for this barcode'); return; }
@@ -815,15 +824,17 @@ async function readLabelPhoto(file) {
 }
 
 // opens the iOS photo library / camera picker (native behavior of a file input)
-function pickLabelPhoto(onPick = null) {
+// opts.barcode links the label values to a scanned code; opts.into replaces an
+// existing food's nutrition with the package label's (id kept, history recalcs)
+function pickLabelPhoto(onPick = null, opts = {}) {
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.accept = 'image/*';
-  inp.onchange = () => { if (inp.files && inp.files[0]) labelPhotoFlow(inp.files[0], onPick); };
+  inp.onchange = () => { if (inp.files && inp.files[0]) labelPhotoFlow(inp.files[0], onPick, opts); };
   inp.click();
 }
 
-async function labelPhotoFlow(file, onPick = null) {
+async function labelPhotoFlow(file, onPick = null, opts = {}) {
   if (!settings.anthropicKey) {
     alert('Label photo reading needs your Claude API key.\n\nGet one at console.anthropic.com → API Keys, then paste it in Settings. It stays on this phone.');
     navTo('settings');
@@ -856,6 +867,22 @@ async function labelPhotoFlow(file, onPick = null) {
   };
   if (prefill.perGram.kcal == null) { alert('The label photo had no readable calories — try a straighter, closer shot.'); return; }
   if (!sg) toast('Label had no gram weight — double-check the serving grams field');
+  if (opts.barcode) prefill.barcode = opts.barcode;
+  if (opts.into) {
+    // package label replaces the online numbers, food identity stays — same id
+    // means past diary entries recalculate; the form opens for review first
+    const into = opts.into;
+    openFoodForm({
+      ...into,
+      name: into.name || prefill.name,
+      perGram: prefill.perGram,
+      servings: prefill.servings.map(s => ({ ...s })),
+      defaultServing: prefill.defaultServing,
+      defaultAmount: 1,
+      source: 'label-user',
+    }, { onSaved: onPick || undefined });
+    return;
+  }
   openFoodForm(null, { prefill, onSaved: onPick || undefined });
 }
 
@@ -961,6 +988,9 @@ function openFoodForm(existing, { barcode = '', onSaved = null, prefill = null }
     if (!f.servings.some(s => s.name === f.defaultServing)) { f.defaultServing = sName; f.defaultAmount = 1; }
     delete f._unsaved;
     delete f.verify; // user reviewed against the package — the disagree warning clears
+    // a saved barcode food = numbers checked against the package in hand; they
+    // outrank online sources until the user explicitly refreshes
+    if (f.barcode) f.labelVerified = true;
     await DB.put('foods', f);
     await refreshFoods();
     schedulePiBackup();
@@ -998,10 +1028,21 @@ async function scanFlow(onPick = null) {
     if (onPick) onPick(food);
     else openFoodDetail(food, { date: currentDate });
   } else {
-    if (confirm(`Barcode ${candidates[0]} not found in Open Food Facts.\n\nEnter it manually from the nutrition label?`)) {
-      openFoodForm(null, { barcode: candidates[0], onSaved: onPick || undefined });
-    }
+    scanNotFound(candidates[0], onPick);
   }
+}
+
+// no database hit for a scanned code: the package in hand is the source of
+// truth, so the label photo comes first (typing stays as the fallback)
+function scanNotFound(code, onPick) {
+  const { el, close } = openSheet(`
+    <div class="sheet-head"><h3>Barcode not found</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="hint">${esc(code)} isn't in the nutrition databases. Get the numbers straight from the package's Nutrition Facts label.</p>
+    ${settings.anthropicKey ? '<button class="btn primary wide" id="nf-photo">🏷 Photograph the label</button>' : ''}
+    <button class="btn wide" id="nf-type">✏️ Type it from the label</button>`);
+  const photoBtn = el.querySelector('#nf-photo');
+  if (photoBtn) photoBtn.onclick = () => { close(); pickLabelPhoto(onPick, { barcode: code }); };
+  el.querySelector('#nf-type').onclick = () => { close(); openFoodForm(null, { barcode: code, onSaved: onPick || undefined }); };
 }
 
 // fetch + parse one barcode from Open Food Facts; returns an unsaved food or null
@@ -1106,6 +1147,7 @@ async function refreshBarcodeFood(food) {
   food.perGram = fresh.perGram;
   food.servings = fresh.servings;
   food.source = fresh.source;
+  delete food.labelVerified; // online data replaced the package numbers (user ok'd it)
   if (fresh.verify) food.verify = true; else delete food.verify;
   if (!food.servings.some(s => s.name === food.defaultServing)) {
     food.defaultServing = fresh.defaultServing;
