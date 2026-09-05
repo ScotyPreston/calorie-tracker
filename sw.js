@@ -1,6 +1,6 @@
 // Service worker: cache the app shell so the tracker works fully offline.
 // Bump VERSION on every deploy so clients pick up new files.
-const VERSION = 'ct-v31';
+const VERSION = 'ct-v32';
 
 const SHELL = [
   './',

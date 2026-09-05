@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v31';
+const APP_VERSION = 'v32';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -259,6 +259,8 @@ function servingDesc(food) {
   const s = (food.servings || []).find(x => x.name === food.defaultServing) || food.servings?.[0];
   if (!s) return '';
   const amt = food.defaultAmount || 1;
+  // g and ml are units in their own right — no "(Xg)" annotation
+  if (s.name === 'g' || s.name === 'ml') return `${fg(amt)} ${s.name}`;
   return `${fg(amt)} ${s.name} (${fg(amt * s.grams)}g)`;
 }
 
@@ -547,7 +549,7 @@ function openFoodDetail(food, ctx = {}) {
         <div class="fd-controls">
           <label>Amount<input class="input" id="fd-amount" type="number" inputmode="decimal" step="any" min="0" value="${amount}"></label>
           <label>Serving Size<select class="input" id="fd-serving">
-            ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${esc(s.name)} (${fg(s.grams)}g)</option>`).join('')}
+            ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${s.name === 'g' || s.name === 'ml' ? esc(s.name) : `${esc(s.name)} (${fg(s.grams)}g)`}</option>`).join('')}
           </select></label>
         </div>
         <div class="fd-weigh">
