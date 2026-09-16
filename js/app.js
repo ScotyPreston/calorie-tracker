@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v36';
+const APP_VERSION = 'v37';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -488,6 +488,19 @@ function labelLooksCookedBasis(food) {
     || nameWords.test(food.name || '');
 }
 
+// First log of a cookable food: settle before-vs-after-cooking up front so the
+// conversion isn't silently skipped. The answer is recorded on the food at log
+// time (weighPref/weighMethod), so this shows at most until the first log.
+function askWeighTiming(food, onPick) {
+  const { el, close } = openSheet(`
+    <div class="sheet-head"><h3 class="grow">When did you weigh “${esc(food.name)}”?</h3><button class="icon-btn" data-close>✕</button></div>
+    <button class="btn wide" id="wt-raw">🥄 Before cooking (raw)</button>
+    <button class="btn wide" id="wt-cooked">🔥 After cooking — convert for me</button>
+    <p class="hint tiny">Raw meat and dry grain labels count uncooked grams — weighed after cooking, the grams need converting or the calories come out wrong. Your answer is remembered for this food.</p>`);
+  el.querySelector('#wt-raw').onclick = () => { close(); onPick('raw'); };
+  el.querySelector('#wt-cooked').onclick = () => { close(); onPick('cooked'); };
+}
+
 function openFoodDetail(food, ctx = {}) {
   // ctx: {mode:'add'|'edit-entry', entry, date, group, onLogged}
   const mode = ctx.mode || 'add';
@@ -517,6 +530,14 @@ function openFoodDetail(food, ctx = {}) {
     ? (entry.servingName && (food.servings || []).some(s => s.name === entry.servingName) ? entry.servingName : 'g')
     : (food.defaultServing && (food.servings || []).some(s => s.name === food.defaultServing) ? food.defaultServing : (food.servings?.[0]?.name || 'g'));
   if (entry && !entry.servingName) amount = entry.grams;
+  // logs after the first: preselect how this food was last weighed. defaultAmount
+  // was rewritten to RAW-equivalent grams at log time, so show it back as the
+  // cooked grams that were actually typed.
+  if (!isRecipe && !entry && food.weighPref === 'cooked' && food.weighMethod) {
+    weighMode = 'cooked';
+    cookMethod = { ...food.weighMethod };
+    if (servingName === 'g' && +amount > 0) amount = Math.round(amount * cookMethod.factor * 10) / 10;
+  }
   let group = entry ? (entry.group || null) : (ctx.group || (settings.groupsEnabled ? groupForNow() : null));
   const ts = entry?.timestamp ? new Date(entry.timestamp) : new Date();
   let timeVal = String(ts.getHours()).padStart(2, '0') + ':' + String(ts.getMinutes()).padStart(2, '0');
@@ -706,6 +727,13 @@ function openFoodDetail(food, ctx = {}) {
         logAmount = Math.round(g * 10) / 10;
         logServing = 'g';
       }
+      // remember how this food gets weighed — the next open preselects it and
+      // the before/after-cooking ask never repeats for this food
+      if (!isRecipe && mode !== 'edit-entry') {
+        const usedCooked = weighMode === 'cooked' && cookMethod;
+        food.weighPref = usedCooked ? 'cooked' : 'raw';
+        food.weighMethod = usedCooked ? { label: cookMethod.label, factor: cookMethod.factor } : null;
+      }
       const date = ctx.date || currentDate;
       const [hh, mm] = timeVal.split(':').map(Number);
       const [y, mo, d] = date.split('-').map(Number);
@@ -743,6 +771,18 @@ function openFoodDetail(food, ctx = {}) {
   };
 
   render();
+  // first log of a cookable food (no recorded weighing preference yet, label
+  // not already cooked-basis): ask before/after cooking up front
+  if (mode === 'add' && !isRecipe && !food.weighPref
+    && !labelLooksCookedBasis(food) && guessYieldCat(food.name) != null) {
+    askWeighTiming(food, ans => {
+      if (ans === 'raw') { weighMode = 'raw'; cookMethod = null; render(); }
+      else openYieldPicker({ name: food.name }, y => {
+        if (!y) { weighMode = 'raw'; } else { cookMethod = y; weighMode = 'cooked'; }
+        render();
+      }, guessYieldCat(food.name) ?? 0);
+    });
+  }
 }
 
 async function addLogEntry(food, { grams, amount, servingName, date, group, timestamp }) {
