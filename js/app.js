@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v35';
+const APP_VERSION = 'v36';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -476,6 +476,18 @@ function pickFood(onPick) {
 
 // ---------------------------------------------------------------- food detail
 
+// Labels stated per COOKED weight ("2 skillet cooked slices (13g)" — bacon's the
+// classic) need NO cooked→raw conversion: the shrink is already in the label's
+// numbers, so converting again double-counts. Serving text is where makers state
+// the basis; the food NAME only counts for words that only pre-cooked products use
+// (a user's own "baked chicken" food is usually a raw-basis label they baked).
+function labelLooksCookedBasis(food) {
+  const servingWords = /\b(cooked|pan.?fried|fried|skillet|grilled|roasted|baked|broiled|air.?fried|rotisserie|prepared)\b/i;
+  const nameWords = /rotisserie|fully.?cooked|pre.?cooked/i;
+  return (food.servings || []).some(s => servingWords.test(s.name || ''))
+    || nameWords.test(food.name || '');
+}
+
 function openFoodDetail(food, ctx = {}) {
   // ctx: {mode:'add'|'edit-entry', entry, date, group, onLogged}
   const mode = ctx.mode || 'add';
@@ -625,6 +637,8 @@ function openFoodDetail(food, ctx = {}) {
     const cookedBtn = overlayBack.querySelector('#fd-w-cooked');
     if (cookedBtn) cookedBtn.onclick = () => {
       // recipe perGram is already cooked-basis — no cook method to pick
+      if (!isRecipe && !cookMethod && labelLooksCookedBasis(food)
+        && !confirm('This label looks like it’s already per COOKED weight (its serving says something like “cooked slices”). Your scale and the label already match — converting would overcount. Convert anyway?')) return;
       if (isRecipe || cookMethod) { weighMode = 'cooked'; render(); } else pickMethod();
     };
     const rMethodBtn = overlayBack.querySelector('#fd-rmethod');
