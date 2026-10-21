@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v37';
+const APP_VERSION = 'v38';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -46,9 +46,26 @@ async function boot() {
   });
   navTo('dashboard');
 
+  // coming back to the foreground: the diary may be stale (another device
+  // restored a backup, or a save failed while the app was being suspended)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (document.getElementById('screen-dashboard').classList.contains('active')) renderDashboard();
+  });
+
   // safety-net backup to the Pi shortly after every open (quiet if unreachable)
   setTimeout(() => piBackupNow(false), 5000);
 }
+
+// Nothing fails silently: a save that throws (quota, dropped IndexedDB
+// connection) used to vanish into an unhandled rejection with the sheet left
+// open and no entry in the diary. Show the real error instead.
+function reportError(e) {
+  const msg = (e && (e.message || e.name)) ? `${e.name && e.name !== 'Error' ? e.name + ': ' : ''}${e.message || ''}` : String(e);
+  toast('⚠ ' + (msg || 'Something went wrong').slice(0, 160), 5000);
+}
+window.addEventListener('unhandledrejection', ev => { ev.preventDefault(); reportError(ev.reason); });
+window.addEventListener('error', ev => reportError(ev.error || ev.message));
 
 // Registered OUTSIDE boot(): if boot ever throws (e.g. a bad cache served
 // mixed module versions), the service worker update path must still run so
@@ -197,13 +214,13 @@ function navTo(name) {
 
 // ---------------------------------------------------------------- tiny UI kit
 
-function toast(msg) {
+function toast(msg, ms = 1900) {
   const t = document.createElement('div');
   t.className = 'toast';
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.classList.add('show'), 10);
-  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 1900);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, ms);
 }
 
 // bottom sheet; returns {el, close}
@@ -738,11 +755,20 @@ function openFoodDetail(food, ctx = {}) {
       const [hh, mm] = timeVal.split(':').map(Number);
       const [y, mo, d] = date.split('-').map(Number);
       const timestamp = new Date(y, mo - 1, d, hh || 0, mm || 0).toISOString();
-      if (mode === 'edit-entry') {
-        await DB.put('log', { ...entry, grams: g, amount: logAmount, servingName: logServing, group: settings.groupsEnabled ? group : null, timestamp });
-        schedulePiBackup();
-      } else {
-        await addLogEntry(food, { grams: g, amount: logAmount, servingName: logServing, date, group: settings.groupsEnabled ? group : null, timestamp });
+      const btn = overlayBack.querySelector('#fd-log');
+      btn.disabled = true;
+      try {
+        if (mode === 'edit-entry') {
+          await DB.put('log', { ...entry, grams: g, amount: logAmount, servingName: logServing, group: settings.groupsEnabled ? group : null, timestamp });
+          schedulePiBackup();
+        } else {
+          await addLogEntry(food, { grams: g, amount: logAmount, servingName: logServing, date, group: settings.groupsEnabled ? group : null, timestamp });
+        }
+      } catch (e) {
+        // the sheet stays open with the numbers intact so the tap can be retried
+        btn.disabled = false;
+        toast(`⚠ Not saved — ${(e && (e.message || e.name)) || e}`.slice(0, 160), 5000);
+        return;
       }
       close();
       if (ctx.onLogged) ctx.onLogged();
