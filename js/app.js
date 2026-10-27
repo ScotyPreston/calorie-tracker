@@ -9,7 +9,7 @@ import { scanBarcode, codeCandidates } from './scanner.js';
 import { labelOverride } from './label-overrides.js';
 
 // keep in sync with VERSION in sw.js
-const APP_VERSION = 'v38';
+const APP_VERSION = 'v39';
 
 // Raspberry Pi backup target — reachable only when the phone is on the tailnet
 const PI_URL = 'https://fbasz.tail23902b.ts.net';
@@ -559,7 +559,9 @@ function openFoodDetail(food, ctx = {}) {
   const ts = entry?.timestamp ? new Date(entry.timestamp) : new Date();
   let timeVal = String(ts.getHours()).padStart(2, '0') + ':' + String(ts.getMinutes()).padStart(2, '0');
 
-  const render = () => {
+  // numbers that change as the amount is typed — rendered on their own so
+  // softUpdate can swap just these nodes and leave the focused input alone
+  const numbersHTML = () => {
     const serving = (food.servings || []).find(s => s.name === servingName) || { name: 'g', grams: 1 };
     const typedGrams = (parseFloat(amount) || 0) * serving.grams;
     const isCooked = weighMode === 'cooked' && !!cookMethod;
@@ -588,7 +590,28 @@ function openFoodDetail(food, ctx = {}) {
     } else {
       segs = `<circle cx="60" cy="60" r="${R}" fill="none" stroke="var(--line)" stroke-width="10"/>`;
     }
+    return `
+        <div class="fd-info-line">${isCooked
+          ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} cooked — ${fg(grams)}g raw`
+          : recipeRaw
+          ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} raw — ${fg(grams)}g cooked`
+          : `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} — ${fg(grams)}g`}</div>
+        <div class="energy-summary">
+          <svg viewBox="0 0 120 120" class="donut">${segs}
+            <text x="60" y="57" text-anchor="middle" class="donut-kcal">${f0(n.kcal)}</text>
+            <text x="60" y="74" text-anchor="middle" class="donut-unit">kcal</text>
+          </svg>
+          <div class="macro-legend">
+            <div><i style="background:var(--c-protein)"></i>Protein <b>${fg(n.protein)}g</b> <span class="dim">${pctOf(mk.protein)}</span></div>
+            <div><i style="background:var(--c-carbs)"></i>Carbs <b>${fg(n.carbs)}g</b> <span class="dim">${pctOf(mk.carbs)}</span></div>
+            <div><i style="background:var(--c-fat)"></i>Fat <b>${fg(n.fat)}g</b> <span class="dim">${pctOf(mk.fat)}</span></div>
+          </div>
+        </div>`;
+  };
 
+  const render = () => {
+    const isCooked = weighMode === 'cooked' && !!cookMethod;
+    const recipeRaw = isRecipe && weighMode === 'raw';
     overlayBack.innerHTML = `
       <div class="overlay-card">
         <div class="sheet-head">
@@ -597,7 +620,7 @@ function openFoodDetail(food, ctx = {}) {
           <button class="icon-btn" id="fd-close">✕</button>
         </div>
         <div class="fd-controls">
-          <label>Amount<input class="input" id="fd-amount" type="number" inputmode="decimal" step="any" min="0" value="${amount}"></label>
+          <label>Amount<input class="input" id="fd-amount" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done" value="${esc(String(amount))}"></label>
           <label>Serving Size<select class="input" id="fd-serving">
             ${(food.servings || []).map(s => `<option value="${esc(s.name)}" ${s.name === servingName ? 'selected' : ''}>${s.name === 'g' || s.name === 'ml' ? esc(s.name) : `${esc(s.name)} (${fg(s.grams)}g)`}</option>`).join('')}
           </select></label>
@@ -625,22 +648,7 @@ function openFoodDetail(food, ctx = {}) {
           </select></label>` : ''}
           <label>Time<input class="input" id="fd-time" type="time" value="${timeVal}"></label>
         </div>
-        <div class="fd-info-line">${isCooked
-          ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} cooked — ${fg(grams)}g raw`
-          : recipeRaw
-          ? `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} raw — ${fg(grams)}g cooked`
-          : `Nutritional Information per ${fg(parseFloat(amount) || 0)} ${esc(serving.name)} — ${fg(grams)}g`}</div>
-        <div class="energy-summary">
-          <svg viewBox="0 0 120 120" class="donut">${segs}
-            <text x="60" y="57" text-anchor="middle" class="donut-kcal">${f0(n.kcal)}</text>
-            <text x="60" y="74" text-anchor="middle" class="donut-unit">kcal</text>
-          </svg>
-          <div class="macro-legend">
-            <div><i style="background:var(--c-protein)"></i>Protein <b>${fg(n.protein)}g</b> <span class="dim">${pctOf(mk.protein)}</span></div>
-            <div><i style="background:var(--c-carbs)"></i>Carbs <b>${fg(n.carbs)}g</b> <span class="dim">${pctOf(mk.carbs)}</span></div>
-            <div><i style="background:var(--c-fat)"></i>Fat <b>${fg(n.fat)}g</b> <span class="dim">${pctOf(mk.fat)}</span></div>
-          </div>
-        </div>
+        <div id="fd-numbers">${numbersHTML()}</div>
         ${labelLooksOff(food.perGram, labelServingGrams(food)) ? `<p class="hint warn">⚠ Calories don't match this label's macros — the data may be per-serving numbers. Tap ${food.source === 'recipe' ? 'Edit recipe' : 'Edit food'} and double-check the label.</p>` : ''}
         ${food.verify ? `<p class="hint warn">⚠ Nutrition databases disagree about this product — compare these numbers against the package. Tap Edit food to fix them (saving clears this warning).</p>` : ''}
         <div class="row gap">
@@ -654,7 +662,7 @@ function openFoodDetail(food, ctx = {}) {
       </div>`;
 
     overlayBack.querySelector('#fd-close').onclick = close;
-    overlayBack.querySelector('#fd-amount').oninput = e => { amount = e.target.value; softUpdate(); };
+    overlayBack.querySelector('#fd-amount').oninput = e => { amount = e.target.value.replace(',', '.'); softUpdate(); };
     overlayBack.querySelector('#fd-serving').onchange = e => { servingName = e.target.value; render(); };
     const pickMethod = () => openYieldPicker({ name: food.name }, y => {
       if (!y) { weighMode = 'raw'; } else { cookMethod = y; weighMode = 'cooked'; }
@@ -728,6 +736,7 @@ function openFoodDetail(food, ctx = {}) {
       toast(r.warn ? 'Refreshed — but this product’s database entry looks shaky, double-check the label' : 'Product data refreshed ✓');
     };
     overlayBack.querySelector('#fd-log').onclick = async () => {
+      const serving = (food.servings || []).find(s => s.name === servingName) || { name: 'g', grams: 1 };
       let g = (parseFloat(amount) || 0) * serving.grams;
       if (g <= 0) { toast('Enter an amount first'); return; }
       // cooked mode: the entry stores the RAW-equivalent so re-editing it later
@@ -783,17 +792,12 @@ function openFoodDetail(food, ctx = {}) {
     };
   };
 
-  // update numbers without rebuilding (keeps keyboard focus on iOS)
+  // update numbers without rebuilding — the Amount input is never replaced, so
+  // the iOS keyboard stays up and a half-typed "1." isn't lost
   const softUpdate = () => {
-    const serving = (food.servings || []).find(s => s.name === servingName) || { name: 'g', grams: 1 };
-    const grams = (parseFloat(amount) || 0) * serving.grams;
-    const focusEl = document.activeElement;
-    const pos = focusEl && focusEl.id === 'fd-amount' ? focusEl.selectionStart : null;
-    render();
-    if (pos != null) {
-      const a = overlayBack.querySelector('#fd-amount');
-      a.focus();
-    }
+    const box = overlayBack.querySelector('#fd-numbers');
+    if (box) box.innerHTML = numbersHTML();
+    else render();
   };
 
   render();
